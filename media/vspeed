@@ -1,0 +1,32 @@
+#!/bin/bash
+# @pas-executable
+# Speed up video and audio using ffmpeg setpts filter.
+
+# Check if the user provided a filename
+if [ -z "$1" ]; then
+    echo "Usage: $0 <input_filename> [speed_factor] [output_filename]"
+    exit 1
+fi
+
+# Assign input variables
+input_file="$1"
+speed_factor="${2:-2}"      # Default speed factor is 2
+
+# Generate default output filename with speed factor postfix
+if [ -z "$3" ]; then
+    base_name=$(basename "$input_file" .mp4)
+    output_file="${base_name}_${speed_factor}x.mp4"
+else
+    output_file="$3"
+fi
+
+# Check if the speed factor is a valid number
+if ! [[ "$speed_factor" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+    echo "Error: Speed factor must be a number."
+    exit 1
+fi
+
+# Command to speed up the video and audio
+ffmpeg -i "$input_file" -filter_complex "setpts=PTS/$speed_factor" "$output_file"
+
+echo "Processed $input_file at $speed_factor x speed. Output saved to $output_file."

@@ -1,0 +1,67 @@
+#!/bin/bash
+# @pas-executable
+# Split a video into fixed-duration segments.
+
+# Check if correct number of arguments is provided
+if [ "$#" -lt 2 ]; then
+    segment_duration=5
+    echo "Using default segment duration: $segment_duration seconds"
+elif [ "$#" -ne 2 ]; then
+    echo "Usage: $0 <input_video> <segment_duration>"
+    echo "Example: $0 input.mp4 5"
+    exit 1
+fi
+
+# Assign arguments
+input_video="$1"
+if [ -z "$segment_duration" ]; then
+    segment_duration="$2"
+fi
+
+# Check if input file exists
+if [ ! -f "$input_video" ]; then
+    echo "Error: Input file '$input_video' does not exist."
+    exit 1
+fi
+
+# Check if ffmpeg is installed
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "Error: ffmpeg is not installed. Please install it first."
+    exit 1
+fi
+
+# Get the total duration of the video in seconds
+total_duration=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$input_video")
+if [ -z "$total_duration" ]; then
+    echo "Error: Could not determine video duration."
+    exit 1
+fi
+
+# Calculate number of full segments and remainder
+full_segments=$(awk "BEGIN {print int($total_duration / $segment_duration)}")
+remainder=$(awk "BEGIN {print $total_duration - ($full_segments * $segment_duration)}")
+
+# Extract base filename without extension
+base_name=$(basename "$input_video" | sed 's/\.[^.]*$//')
+
+# Loop through full segments
+for ((i = 0; i < full_segments; i++)); do
+    start_time=$(awk "BEGIN {print $i * $segment_duration}")
+    end_time=$(awk "BEGIN {print ($i + 1) * $segment_duration}")
+    output_file="${base_name}_${start_time}_${end_time}.mp4"
+    
+    echo "Splitting: $start_time to $end_time -> $output_file"
+    ffmpeg -i "$input_video" -ss "$start_time" -t "$segment_duration" -c:v libx264 -c:a aac -y "$output_file" >/dev/null 2>&1
+done
+
+# Handle the remainder (if any)
+if [ $(awk "BEGIN {print ($remainder > 0)}") -eq 1 ]; then
+    start_time=$(awk "BEGIN {print $full_segments * $segment_duration}")
+    end_time="$total_duration"
+    output_file="${base_name}_${start_time}_${end_time}.mp4"
+    
+    echo "Splitting: $start_time to $end_time -> $output_file"
+    ffmpeg -i "$input_video" -ss "$start_time" -t "$remainder" -c:v libx264 -c:a aac -y "$output_file" >/dev/null 2>&1
+fi
+
+echo "Done splitting '$input_video' into $segment_duration-second segments."

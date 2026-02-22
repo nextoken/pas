@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+def prompt_yes_no(message: str, default: bool = False) -> bool:
+    """Prompt for yes/no."""
+    suffix = "[Y/n]" if default else "[y/N]"
+    try:
+        while True:
+            choice = input(f"{message} {suffix}: ").strip().lower()
+            if choice == "":
+                return default
+            if choice in {"y", "yes"}:
+                return True
+            if choice in {"n", "no"}:
+                return False
+            print("Please enter y or n.")
+    except (EOFError, KeyboardInterrupt):
+        print("\nAborted.")
+        return False
+
+def main():
+    # Use the resolved path for comparison but the display path for the user
+    display_bin = "$HOME/bin_pas"
+    target_bin = Path("~/bin_pas").expanduser().resolve()
+    target_bin_str = str(target_bin)
+    
+    # Check current PATH
+    path_env = os.environ.get("PATH", "").split(os.pathsep)
+    # Filter out empty strings and resolve each path for comparison
+    path_resolved = []
+    for p in path_env:
+        if not p:
+            continue
+        try:
+            path_resolved.append(str(Path(p).expanduser().resolve()))
+        except Exception:
+            pass
+    
+    if target_bin_str in path_resolved:
+        print(f"[OK] {display_bin} is already in your PATH.")
+        return
+
+    # Detect shell config file
+    shell_path = os.environ.get("SHELL", "")
+    shell_name = os.path.basename(shell_path)
+    
+    config_file = None
+    if "zsh" in shell_name:
+        config_file = Path("~/.zshrc").expanduser()
+    elif "bash" in shell_name:
+        config_file = Path("~/.bashrc").expanduser()
+        if not config_file.exists():
+            # Fallback for macOS where .bash_profile is often used instead of .bashrc
+            config_file = Path("~/.bash_profile").expanduser()
+    
+    if not config_file:
+        print(f"[!] {display_bin} is NOT in your PATH.")
+        print(f"Could not detect shell configuration file for {shell_name}.")
+        print(f"Please manually add: export PATH=\"{display_bin}:$PATH\"")
+        return
+
+    # Check if it's already in the file but not in the current session
+    if config_file.exists():
+        content = config_file.read_text()
+        if "bin_pas" in content:
+            print(f"[i] {display_bin} is in {config_file.name}, but not in the current session.")
+            if prompt_yes_no("Would you like to refresh your current shell session now?", default=True):
+                print(f"Refreshing shell session via 'exec {shell_name}'...")
+                os.execvp(shell_name, [shell_name])
+            else:
+                print(f"Try running: source ~/{config_file.name}")
+            return
+
+    print(f"[!] {display_bin} is NOT in your PATH.")
+    if prompt_yes_no(f"Would you like to add it to ~/{config_file.name}?", default=True):
+        line_to_add = f'\n# pas tools\nexport PATH="{display_bin}:$PATH"\n'
+        try:
+            with open(config_file, "a") as f:
+                f.write(line_to_add)
+            print(f"[OK] Added to ~/{config_file.name}")
+            if prompt_yes_no("Would you like to refresh your current shell session now?", default=True):
+                print(f"Refreshing shell session via 'exec {shell_name}'...")
+                os.execvp(shell_name, [shell_name])
+            else:
+                print(f"Please restart your terminal or run: source ~/{config_file.name}")
+        except Exception as e:
+            print(f"[XX] Failed to update ~/{config_file.name}: {e}")
+    else:
+        print(f"Skipped. Please manually add: export PATH=\"{display_bin}:$PATH\"")
+
+if __name__ == "__main__":
+    main()

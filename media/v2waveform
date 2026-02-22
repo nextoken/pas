@@ -1,0 +1,45 @@
+#!/bin/bash
+# @pas-executable
+# Create a waveform video from an audio/video file using ffmpeg showwaves filter.
+
+if [ "$#" -lt 1 ]; then
+  # echo "Usage: $0 input_file [ratio] [output_file]"
+  echo "Usage: $0 input_file [output_file]"
+  exit 1
+fi
+
+INPUT_FILE="$1"
+# RATIO="${2:-4}"
+RATIO=4
+# Calculate the size based on the value of X
+WIDTH=$((200 * RATIO))
+HEIGHT=200
+SIZE="${WIDTH}x${HEIGHT}"
+DEFAULT_OUTPUT_FILE="${INPUT_FILE%.*}_waveform_${SIZE}.mp4"
+echo "DEFAULT_OUTPUT_FILE: $DEFAULT_OUTPUT_FILE"
+OUTPUT_FILE="${2:-$DEFAULT_OUTPUT_FILE}"
+# Extract the FPS from the input video
+FPS=$(ffmpeg -i "$INPUT_FILE" 2>&1 | sed -n "s/.*, \(.*\) fps.*/\1/p")
+
+# refs:
+# 1. https://shotstack.io/learn/ffmpeg-create-waveform/
+# 2. https://christianheilmann.com/2023/08/31/adding-sound-wave-overlays-to-videos-and-pictures-using-ffmpeg/
+# TODO:
+# 3. Circular: https://www.splashmusic.com/post/audio-visualisation-with-ffmpeg
+#    a. ffmpeg -i larissa-outsole.mp3 -filter_complex "aformat=channel_layouts=mono,showwaves=mode=cline:s=904X904:colors=#ffa07a@0.5[v]" -map "[v]" -pix_fmt yuv420p song_viz.mp4
+#    b. ffmpeg -i song_viz.mp4 -filter_complex "format=rgba,geq='p(mod((2*W/(2*PI))*(PI+atan2(0.5*H-Y,X-W/2)),W), H-2*hypot(0.5*H-Y,X-W/2))'" -pix_fmt yuv420p song_viz_circle.mp4
+# mode: point(default), line, cline(nice smoother look), p2p
+# size: widthxheight, colors: wave color@wave opacity, draw: full(default), split
+# ffmpeg -i "$INPUT_FILE" -r "$FPS" -fps_mode vfr \
+# ffmpeg -i "$INPUT_FILE" \
+#   -filter_complex "[0:a]compand,showwaves=size=854x480:colors=#ffa07a@0.5:draw=full:mode=cline,format=yuv420p[vout]" \
+#   -map "[vout]" -map 0:a -c:v libx264 -c:a copy "$OUTPUT_FILE"
+
+# FIXME: fps_mode or vfr not working also other suggestions from copilot won't solve the issue 
+# - out video length mismatch, roughly 0.04s longer, whether a constant is to be confirmed
+# -filter_complex "[0:a]compand,showwaves=size=854x480:colors=#ffa07a@0.5\
+ffmpeg -i "$INPUT_FILE" \
+  -filter_complex "[0:a]compand,showwaves=size=${SIZE}:colors=#ffa07a@0.5\
+  :scale=sqrt:draw=full:mode=cline,format=yuv420p[vout]" \
+  -r "$FPS" \
+  -map "[vout]" -map 0:a -c:v libx264 -c:a copy "$OUTPUT_FILE"

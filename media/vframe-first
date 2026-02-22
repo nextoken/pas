@@ -1,0 +1,21 @@
+#!/bin/bash
+# @pas-executable
+# Extract the first frame of a video using ffmpeg.
+
+v_frame_first() {
+  input_file=$1
+  output_file=$2
+
+  # Check if output file is provided
+  if [ -z "$output_file" ]; then
+    # Create default output file name
+    base_name=$(basename "$input_file" .mp4)
+    output_file="${base_name}_first_frame.jpg"
+  fi
+
+  # Extract the first frame
+  ffmpeg -i "$input_file" -vf "select=eq(n\,0)" -update 1 -q:v 2 -frames:v 1 "$output_file"
+}
+
+# Call the function with provided arguments
+v_frame_first "$@"

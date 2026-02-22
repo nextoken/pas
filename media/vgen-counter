@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+# @pas-executable
+"""
+Generate a video with a number counter using FFmpeg.
+"""
+import subprocess
+import os
+import shutil
+import argparse
+
+def create_counter_video(start_num, end_num, duration, framerate, output_file, count_up):
+    """
+    Create a video with a number counter using FFmpeg.
+    
+    Args:
+        start_num (int): Starting number.
+        end_num (int): Ending number.
+        duration (float): Video duration in seconds.
+        framerate (int): Frames per second.
+        output_file (str): Output video filename.
+        count_up (bool): True for counting up, False for counting down.
+    """
+    # Calculate total frames and step size
+    total_frames = int(duration * framerate)
+    num_range = end_num - start_num if count_up else start_num - end_num
+    step = num_range / (total_frames - 1) if total_frames > 1 else 0
+
+    # Directory for temporary PNGs
+    temp_dir = "temp_pngs"
+    os.makedirs(temp_dir, exist_ok=True)
+    png_pattern = os.path.join(temp_dir, "frame%d.png")
+
+    # FFmpeg command to generate PNG sequence
+    if count_up:
+        text_expr = f"'%{start_num}+floor(n*{step})'"
+    else:
+        text_expr = f"'%{start_num}-floor(n*{step})'"
+
+    # Try to use a generic font name
+    font_option = "font='Arial'"
+    
+    png_cmd = [
+        "ffmpeg",
+        "-f", "lavfi",
+        "-i", f"color=c=black:s=640x480:r={framerate}:d={duration}",
+        "-vf", f"drawtext={font_option}:text={text_expr}:fontcolor=white:fontsize=48:x=(w-tw)/2:y=(h-th)/2,format=yuva420p",
+        "-c:v", "png",
+        "-frames:v", str(total_frames),
+        png_pattern,
+        "-y"  # Overwrite without asking
+    ]
+
+    # Run PNG generation
+    try:
+        subprocess.run(png_cmd, check=True, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        print(f"Error generating PNGs: {e.stderr.decode()}")
+        return
+
+    # FFmpeg command to combine PNGs into WebM
+    video_cmd = [
+        "ffmpeg",
+        "-framerate", str(framerate),
+        "-i", png_pattern,
+        "-c:v", "libvpx-vp9",
+        "-b:v", "1M",
+        "-auto-alt-ref", "0",
+        "-pix_fmt", "yuva420p",
+        output_file,
+        "-y"  # Overwrite without asking
+    ]
+
+    # Run video creation
+    try:
+        subprocess.run(video_cmd, check=True, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        print(f"Error creating video: {e.stderr.decode()}")
+        return
+
+    # Clean up temporary PNGs
+    shutil.rmtree(temp_dir)
+    print(f"Video created: {output_file}")
+
+if __name__ == "__main__":
+    # Set up argument parser
+    parser = argparse.ArgumentParser(description="Generate a video with a number counter using FFmpeg.")
+    parser.add_argument("start_num", type=int, help="Starting number")
+    parser.add_argument("end_num", type=int, help="Ending number")
+    parser.add_argument("--duration", type=float, default=5, help="Video duration in seconds (default: 5)")
+    parser.add_argument("--framerate", type=int, default=25, help="Frames per second (default: 25)")
+    parser.add_argument("--output", type=str, default="output.webm", help="Output video filename (default: output.webm)")
+    parser.add_argument("--direction", choices=["up", "down"], default="up", help="Counting direction: 'up' or 'down' (default: up)")
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Convert direction to boolean
+    count_up = args.direction == "up"
+
+    # Call the function with parsed arguments
+    create_counter_video(
+        start_num=args.start_num,
+        end_num=args.end_num,
+        duration=args.duration,
+        framerate=args.framerate,
+        output_file=args.output,
+        count_up=count_up
+    )

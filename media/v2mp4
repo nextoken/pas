@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+# @pas-executable
+"""
+Convert video files to MP4 format using ffmpeg.
+Supports wildcards and explicit output file specification.
+"""
+
+import argparse
+import glob
+import os
+import subprocess
+import sys
+
+
+def convert_video(input_file, output_file=None, dry_run=False, delete_after=False, current=None, total=None):
+    """Convert a single video file to MP4 format."""
+    if output_file is None:
+        # Generate output filename by replacing extension with .mp4
+        base_name = os.path.splitext(os.path.basename(input_file))[0]
+        output_dir = os.path.dirname(input_file) if os.path.dirname(input_file) else '.'
+        output_file = os.path.join(output_dir, f"{base_name}.mp4")
+    
+    # Format progress counter
+    progress = f"[{current}/{total}] " if current is not None and total is not None else ""
+    
+    if dry_run:
+        delete_msg = " (will delete original)" if delete_after else ""
+        print(f"{progress}{input_file} -> {output_file}{delete_msg}")
+        return True
+    
+    print(f"{progress}Converting: {input_file} -> {output_file}")
+    
+    try:
+        subprocess.run(
+            ['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-i', input_file, '-c:v', 'libx264', '-c:a', 'copy', output_file],
+            check=True
+        )
+        print(f"Successfully converted: {output_file}")
+        
+        # Delete original file if requested and output file exists
+        if delete_after:
+            if os.path.exists(output_file):
+                try:
+                    os.remove(input_file)
+                    print(f"Deleted original: {input_file}")
+                except OSError as e:
+                    print(f"Warning: Could not delete {input_file}: {e}", file=sys.stderr)
+            else:
+                print(f"Warning: Output file {output_file} not found, skipping deletion of {input_file}", file=sys.stderr)
+        
+    except subprocess.CalledProcessError as e:
+        print(f"Error converting {input_file}: {e}", file=sys.stderr)
+        return False
+    except FileNotFoundError:
+        print("Error: ffmpeg not found. Please install ffmpeg.", file=sys.stderr)
+        return False
+    
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Convert video files to MP4 format',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  v2mp4 input.avi                    # Converts to input.mp4
+  v2mp4 input.avi -o output.mp4      # Converts to output.mp4
+  v2mp4 *.AVI                        # Converts all .AVI files to .mp4
+  find . -name "*.avi" | v2mp4       # Converts files from find command
+        """
+    )
+    
+    parser.add_argument(
+        'input_files',
+        nargs='*',
+        help='Input video file(s) or wildcard pattern (e.g., *.AVI). If not provided, reads from stdin.'
+    )
+    
+    parser.add_argument(
+        '-o', '--output',
+        dest='output_file',
+        help='Explicit output file name (only valid when single input file)'
+    )
+    
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        help='Show conversion queue without actually converting files'
+    )
+    
+    parser.add_argument(
+        '--delete-after',
+        action='store_true',
+        help='Delete the original file after successful conversion'
+    )
+    
+    args = parser.parse_args()
+    
+    # Get input files from command line or stdin
+    input_files = []
+    
+    if args.input_files:
+        # Expand wildcards in input files
+        for pattern in args.input_files:
+            expanded = glob.glob(pattern)
+            if expanded:
+                input_files.extend(expanded)
+            else:
+                # If glob doesn't match, treat as literal filename
+                input_files.append(pattern)
+    else:
+        # Check if stdin is available (piped input)
+        if not sys.stdin.isatty():
+            # Read from stdin
+            for line in sys.stdin:
+                line = line.strip()
+                if line:  # Skip empty lines
+                    input_files.append(line)
+        else:
+            # No input provided
+            parser.print_help()
+            sys.exit(1)
+    
+    if not input_files:
+        print("Error: No input files found.", file=sys.stderr)
+        sys.exit(1)
+    
+    # Validate -o flag usage
+    if args.output_file and len(input_files) > 1:
+        print("Error: -o option can only be used with a single input file.", file=sys.stderr)
+        sys.exit(1)
+    
+    # Filter out non-existent files and count valid files
+    valid_files = [f for f in input_files if os.path.exists(f)]
+    total_files = len(valid_files)
+    
+    if total_files == 0:
+        print("Error: No valid input files found.", file=sys.stderr)
+        sys.exit(1)
+    
+    # Convert files
+    success_count = 0
+    current = 0
+    for input_file in input_files:
+        if not os.path.exists(input_file):
+            if not args.dry_run:
+                print(f"Warning: File not found: {input_file}", file=sys.stderr)
+            continue
+        
+        current += 1
+        output_file = args.output_file if len(input_files) == 1 else None
+        if convert_video(input_file, output_file, dry_run=args.dry_run, delete_after=args.delete_after, current=current, total=total_files):
+            success_count += 1
+    
+    if not args.dry_run:
+        if success_count == 0:
+            sys.exit(1)
+        print(f"\nConverted {success_count} file(s) successfully.")
+
+
+if __name__ == '__main__':
+    main()

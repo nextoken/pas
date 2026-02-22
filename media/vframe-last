@@ -1,0 +1,30 @@
+#!/bin/bash
+# @pas-executable
+# Extract the last frame of a video.
+
+v_frame_last() {
+  input_file=$1
+  output_file=$2
+
+  # Check if output file is provided
+  if [ -z "$output_file" ]; then
+    # Create default output file name
+    base_name=$(basename "$input_file" .mp4)
+    output_file="${base_name}_last_frame.jpg"
+  fi
+
+#   # Get the frame rate of the video
+#   frame_rate=$(ffmpeg -i "$input_file" 2>&1 | grep -oP ', \K[0-9.]+(?= fps)')
+#   # Get the duration of the video in seconds
+#   duration=$(ffmpeg -i "$input_file" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d , | awk -F: '{ print ($1 * 3600) + ($2 * 60) + $3 }')
+#   # Calculate the total number of frames
+#   total_frames=$(echo "$duration * $frame_rate" | bc)
+
+  # Extract the last frame
+  ffmpeg -sseof -1 -i "$input_file" -update 1 -q:v 2 "$output_file"
+  # NOTE: The following is incorrect
+  # ffmpeg -i "$input_file" -vf "select=gte(n\,$total_frames-1)" -vsync vfr -q:v 2 "$output_file"
+}
+
+# Call the function with provided arguments
+v_frame_last "$@"

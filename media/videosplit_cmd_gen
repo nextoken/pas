@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+# @pas-executable
+"""
+Generate screen captures or clips from video using timecodes defined in a CSV file.
+"""
+import os, sys, argparse, csv
+
+def assure_folder(f):
+    d = os.path.dirname(f)
+    if not os.path.exists(d):
+        os.makedirs(d)
+        #msg('\t *** Created new folder:\t%s' % f)
+    return
+
+# command e.g.
+# ffmpeg -ss 0:04:23.04 -i videos/SNT_front.mov -frames:v 1 snt177.png
+
+def capture_frame(video, time, target_image):
+    cmd = " ffmpeg -y -loglevel quiet -ss %s -i %s -frames:v 1 %s" % (time, video, target_image)
+    # TODO: check why without leading space won't work for every 2 lines of commands in shell
+    # Solution: make list of commands as shell script
+    print(cmd)
+
+def capture_frames(video, csv_file, field, root):
+    rdr = csv.DictReader( open(csv_file,'r') )
+    angle = field.split('_')[-1]
+    for (counter, entry) in enumerate(rdr, start=1):
+        entry_uid = entry['uid']
+        time_marker = entry[field]
+        # .jpg much smaller than .png. Typically 50KB vs 1MB
+        target_image = os.path.join(root,entry_uid,'_src','cap_%s.jpg' % angle)
+        assure_folder(target_image) 
+        capture_frame(video, time_marker, target_image)
+
+def get_clip(video, last_marker, current_marker, target_clip):
+    cmd = "ffmpeg -y -loglevel quiet -i %s -ss %s -to %s -async 1 -strict -2 %s" % (video, last_marker, current_marker, target_clip)
+    print(cmd)
+
+def get_clips(video, csv_file, field, root):
+    rdr = csv.DictReader( open(csv_file,'r') )
+    angle = field.split('_')[-1]
+    last_marker = '00:00:00'
+    for (counter, entry) in enumerate(rdr, start=1):
+        entry_uid = entry['uid']
+        current_marker = entry[field]
+        target_clip = os.path.join(root,entry_uid,'_src','clip_%s.mp4' % angle)
+        assure_folder(target_clip) 
+        if (entry['type'] == 'm'):
+            get_clip(video, last_marker, current_marker, target_clip)
+        last_marker = current_marker
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+            description='videosplit.py: capture video frames from video defined in CSV timecode into organized folders')
+    parser.add_argument('-r', '--root', help='Root directory to start searching for .json files')
+    parser.add_argument('-i', '--csv_file', help='Source .CSV file with uid, timecode marker')
+    parser.add_argument('-m', '--mode', help='Mode: frame | clip')
+    parser.add_argument('-f', '--field', help='Marker field name in CSV. E.g. marker_front, marker_right ')
+    parser.add_argument('video', help='Source video file')
+    args = parser.parse_args()
+    
+    if args.mode == 'frame':
+        capture_frames(args.video, args.csv_file, args.field, args.root)
+    if args.mode == 'clip':
+        get_clips(args.video, args.csv_file, args.field, args.root)
+
+if __name__ == '__main__':
+    main(sys.argv[1:])
+

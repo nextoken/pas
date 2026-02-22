@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+# @pas-executable
+# Simple ffmpeg-based video cutter.
+"""
+Usage:
+    vcut INPUT.mp4 [--start FROM] [--end TO] [OUTPUT.mp4]
+
+Arguments:
+    INPUT.mp4          Path to source video (required)
+    OUTPUT.mp4         Path to output video (optional; will prompt if not provided)
+    --start, -s FROM   Start timestamp (default: 00:00:00)
+    --end, -e TO       End timestamp (optional; if omitted, cuts until end of input)
+
+Examples:
+    # Cut from start to end (will prompt for output)
+    vcut input.mp4
+
+    # Cut from start to end with output specified
+    vcut input.mp4 output.mp4
+
+    # Cut from start to 10 seconds
+    vcut input.mp4 --end 00:00:10 output.mp4
+
+    # Cut from 5 seconds to 20 seconds
+    vcut input.mp4 --start 00:00:05 --end 00:00:20 output.mp4
+
+    # Cut from 1 minute 30.5 seconds to end
+    vcut input.mp4 --start 00:01:30.500 output.mp4
+
+Timestamps are in ffmpeg format, e.g.:
+    00:00:05      (5 seconds)
+    00:01:30.500  (1 minute, 30.5 seconds)
+
+Notes:
+- Requires `ffmpeg` to be installed and available on PATH.
+- Uses stream copy (`-c copy`) for fast, lossless cutting.
+"""
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+def require_ffmpeg() -> str:
+    """Return ffmpeg path or exit with error if missing."""
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        print("[XX] Error: ffmpeg not found on PATH. Please install ffmpeg first.", file=sys.stderr)
+        sys.exit(1)
+    return ffmpeg_path
+
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Cut a video using ffmpeg (stream copy).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__.split("Notes:")[-1] if "Notes:" in __doc__ else None,
+    )
+    parser.add_argument(
+        "input",
+        type=str,
+        help="Path to source video file",
+    )
+    parser.add_argument(
+        "output",
+        type=str,
+        nargs="?",
+        default=None,
+        help="Path to output video file (will prompt if not provided)",
+    )
+    parser.add_argument(
+        "--start",
+        "-s",
+        type=str,
+        default="00:00:00",
+        metavar="FROM",
+        help="Start timestamp in ffmpeg format (default: 00:00:00)",
+    )
+    parser.add_argument(
+        "--end",
+        "-e",
+        type=str,
+        default=None,
+        metavar="TO",
+        help="End timestamp in ffmpeg format (optional; if omitted, cuts until end of input)",
+    )
+    return parser.parse_args()
+
+
+def build_ffmpeg_command(
+    ffmpeg_path: str,
+    input_path: Path,
+    output_path: Path,
+    start: str,
+    end: str | None,
+) -> list[str]:
+    """Build the ffmpeg command as a list of arguments.
+    
+    Uses -ss before -i for fast seeking with stream copy.
+    With -c copy, ffmpeg can only cut at keyframes, so the start time
+    may be adjusted to the nearest previous keyframe. Using -ss only
+    before -i avoids the black frame issue caused by double seeking.
+    """
+    cmd = [ffmpeg_path, "-y"]
+    
+    # Use -ss before -i for fast seeking (only if start is not 00:00:00)
+    if start != "00:00:00":
+        cmd.extend(["-ss", start])
+    
+    cmd.extend(["-i", str(input_path)])
+    cmd.append("-c")
+    cmd.append("copy")
+    
+    # For end time, calculate duration if both start and end are provided
+    # When using -ss before -i, -to is relative to the input file start,
+    # not the seek position, so we can use it directly
+    if end:
+        cmd.extend(["-to", end])
+    
+    cmd.append(str(output_path))
+    return cmd
+
+
+def main() -> None:
+    """Main entry point."""
+    args = parse_args()
+    ffmpeg_path = require_ffmpeg()
+
+    input_path = Path(args.input)
+    
+    # Prompt for output if not provided
+    if args.output is None:
+        output_path_str = input("Enter output video path: ").strip()
+        if not output_path_str:
+            print("[XX] Error: output path is required", file=sys.stderr)
+            sys.exit(1)
+        output_path = Path(output_path_str)
+    else:
+        output_path = Path(args.output)
+
+    if not input_path.exists():
+        print(f"[XX] Error: input file not found: {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if not input_path.is_file():
+        print(f"[XX] Error: input path is not a file: {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    # Ensure output directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = build_ffmpeg_command(ffmpeg_path, input_path, output_path, args.start, args.end)
+
+    print("[>>] Cutting video")
+    print(f"     Input : {input_path}")
+    print(f"     Output: {output_path}")
+    print(f"     From  : {args.start}")
+    if args.end:
+        print(f"     To    : {args.end}")
+
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        print(f"[XX] Error: ffmpeg failed with exit code {exc.returncode}", file=sys.stderr)
+        sys.exit(exc.returncode)
+
+    print("[OK] Done.")
+
+
+if __name__ == "__main__":
+    main()
+

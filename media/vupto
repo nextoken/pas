@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+# @pas-executable
+# Extract media from the beginning up to a desired time.
+"""
+Usage:
+    vupto INPUT [TIME] [OUTPUT]
+
+Arguments:
+    INPUT          Path to source media file (required)
+    TIME           Time to cut up to (default: 00:01:00)
+    OUTPUT         Path to output media file (optional; will generate if not provided)
+
+Examples:
+    vupto input.mp4 00:00:30
+    vupto input.mp3 00:01:00
+    vupto input.mp3 90 output_short.mp3
+
+Timestamps are in ffmpeg format (HH:MM:SS.mmm) or seconds.
+"""
+
+import argparse
+import shutil
+import subprocess
+import sys
+import os
+from pathlib import Path
+
+# Add project root/services to path for helpers
+sys.path.append(str(Path(__file__).resolve().parent.parent / "services"))
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+from helpers.core import console, Panel
+
+def require_ffmpeg() -> str:
+    """Return ffmpeg path or exit with error if missing."""
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        console.print("[bold red][XX] Error: ffmpeg not found on PATH. Please install ffmpeg first.[/bold red]")
+        sys.exit(1)
+    return ffmpeg_path
+
+def parse_args() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Extract media from the beginning up to a desired time.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "input",
+        type=str,
+        help="Path to source media file",
+    )
+    parser.add_argument(
+        "time",
+        type=str,
+        nargs="?",
+        default="00:01:00",
+        help="Time to cut up to (default: 00:01:00)",
+    )
+    parser.add_argument(
+        "output",
+        type=str,
+        nargs="?",
+        default=None,
+        help="Path to output media file (optional)",
+    )
+    return parser.parse_args()
+
+def main() -> None:
+    # Display Capability Summary
+    console.print(Panel.fit(
+        "[bold blue]vupto[/bold blue]\n\n"
+        "Extracts media from the start of a file up to a specified duration.\n"
+        "Supports any media format (mp3, mp4, etc.) by preserving original extension.",
+        title="Toolkit: Media Utility",
+        border_style="blue"
+    ))
+
+    args = parse_args()
+    ffmpeg_path = require_ffmpeg()
+
+    input_path = Path(args.input).expanduser().resolve()
+    if not input_path.exists():
+        console.print(f"[bold red][XX] Error: Input file not found: {input_path}[/bold red]")
+        sys.exit(1)
+
+    # Determine output path
+    if args.output:
+        output_path = Path(args.output).expanduser().resolve()
+    else:
+        # Generate default output name: input_upto_time.ext
+        # Remove colons from time for filename compatibility
+        safe_time = args.time.replace(":", "-")
+        output_path = input_path.parent / f"{input_path.stem}_upto_{safe_time}{input_path.suffix}"
+
+    # Build ffmpeg command
+    # -i before -t is accurate but slower for long files. 
+    # For "upto", starting from 0, it doesn't matter much.
+    # We use -c copy for lossless and fast processing.
+    cmd = [
+        ffmpeg_path,
+        "-y",
+        "-i", str(input_path),
+        "-t", args.time,
+        "-c", "copy",
+        str(output_path)
+    ]
+
+    console.print(f"[>>] Processing: [bold cyan]{input_path.name}[/bold cyan]")
+    console.print(f"     Up to   : [bold yellow]{args.time}[/bold yellow]")
+    console.print(f"     Output  : [bold green]{output_path.name}[/bold green]")
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        console.print(f"\n[bold green][OK] Successfully saved to {output_path}[/bold green]")
+    except subprocess.CalledProcessError as e:
+        console.print(f"\n[bold red][XX] ffmpeg error:[/bold red]\n{e.stderr}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

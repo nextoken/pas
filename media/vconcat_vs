@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+# @pas-executable
+"""
+Batch concatenate all MP4 files in the current directory, trimming the first and last frames.
+
+This tool is specialized for joining clips that may have artifacts at the very beginning 
+or end (common in some video editors). It re-encodes each clip to ensure clean 
+joins at frame boundaries.
+
+Note: This script operates on all .mp4 files in the current directory.
+"""
+
+import os
+import subprocess
+
+def create_filelist(directory):
+    trimmed_dir = os.path.join(directory, 'trimmed')
+    os.makedirs(trimmed_dir, exist_ok=True)
+
+    with open('filelist.txt', 'w') as filelist:
+        for filename in os.listdir(directory):
+            if filename.endswith('.mp4'):
+                trimmed_filename = os.path.join(trimmed_dir, f"trimmed_{filename}")
+                trim_frames(os.path.join(directory, filename), trimmed_filename)
+                # trimmed_filename = f"trimmed_{filename}"
+                # trim_frames(os.path.join(directory, filename), trimmed_filename)
+                filelist.write(f"file '{trimmed_filename}'\n")
+
+def get_fps(input_file):
+    result = subprocess.run(
+        ['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=r_frame_rate', '-of', 'default=noprint_wrappers=1:nokey=1', input_file],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT
+    )
+    fps = result.stdout.decode().strip()
+    num, denom = map(int, fps.split('/'))
+    return num / denom
+
+def trim_frames(input_file, output_file):
+    # Get the duration of the video
+    result = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', input_file],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT
+    )
+    duration = float(result.stdout)
+    # Get the FPS of the video
+    fps = get_fps(input_file)
+    # Trim the first and last frame
+    frame_duration = 1 / fps
+    start_time = frame_duration
+    end_time = duration - frame_duration
+    command = [
+        'ffmpeg', '-i', input_file, '-ss', str(start_time), '-to', str(end_time), '-c:v', 'libx264', '-c:a', 'aac', '-fflags', '+genpts', output_file
+    ]
+    subprocess.run(command)
+
+def concatenate_videos():
+    command = [
+        'ffmpeg', '-f', 'concat', '-safe', '0', '-i', 'filelist.txt', '-c:v', 'libx264', '-c:a', 'aac', '-fflags', '+genpts', 'output.mp4'
+    ]
+    subprocess.run(command)
+
+def cleanup_temp_files(directory):
+    for filename in os.listdir(directory):
+        if filename.startswith('trimmed_') and filename.endswith('.mp4'):
+            os.remove(os.path.join(directory, filename))
+    os.remove('filelist.txt')
+
+if __name__ == "__main__":
+    directory = '.'  # Change this to your target directory if needed
+    create_filelist(directory)
+    concatenate_videos()
+    # cleanup_temp_files(directory)
+    print("Videos have been concatenated into output.mp4 and temporary files have been cleaned up.")

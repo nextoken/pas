@@ -1,0 +1,25 @@
+#!/bin/bash
+# @pas-executable
+# Combine video and audio with a fade-out effect at the end.
+
+# Check if the user provided the required filenames
+if [ "$#" -ne 2 ]; then
+    echo "Usage: $0 <input_video> <input_audio>"
+    exit 1
+fi
+
+# Assign input variables
+input_video="$1"
+input_audio="$2"
+
+# Generate default output filename with _dup postfix
+base_name=$(basename "$input_video" .mp4)
+output_file="${base_name}_dup.mp4"
+
+# Get the duration of the input audio
+audio_duration=$(ffmpeg -i "$input_audio" 2>&1 | grep "Duration" | awk '{print $2}' | tr -d , | awk -F: '{ print ($1 * 3600) + ($2 * 60) + $3 }')
+
+# Command to combine video and audio with a 0.5s fade-out at the end of the audio
+ffmpeg -i "$input_video" -i "$input_audio" -c:v copy -c:a aac -strict experimental -shortest -af "afade=t=out:st=$(echo "$audio_duration - 0.5" | bc):d=0.5" "$output_file"
+
+echo "Combined $input_video and $input_audio with a 0.5s fade-out. Output saved to $output_file."

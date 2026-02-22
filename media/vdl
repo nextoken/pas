@@ -1,0 +1,106 @@
+#!/usr/bin/env bb
+;; @pas-executable
+;; Download a list of URLs from a text file using yt-dlp.
+
+(require '[clojure.java.shell :as shell]
+         '[clojure.string :as str]
+         '[clojure.java.io :as io]
+         '[babashka.cli :as cli])
+
+(defn get-base-name
+  "Extract base name from filename, removing extension"
+  [filename]
+  (-> filename
+      (str/split #"\.")
+      (first)))
+
+(defn pad-number
+  "Pad number with leading zero for two digits"
+  [n]
+  (format "%02d" n))
+
+(defn download-url
+  "Download a single URL using yt-dlp with formatted output"
+  [url prefix line-num use-numbering?]
+  (let [output-template (if use-numbering?
+                          (str prefix "-" (pad-number line-num))
+                          prefix)
+        cmd ["yt-dlp" url "-o" output-template]]
+    (println (str "Downloading: " url " -> " output-template))
+    (let [result (apply shell/sh cmd)]
+      (if (= 0 (:exit result))
+        (println (str "✓ Successfully downloaded: " output-template))
+        (do
+          (println (str "✗ Failed to download: " url))
+          (when (not (str/blank? (:err result)))
+            (println "Error:" (:err result))))))))
+
+(defn process-file
+  "Process the input file and download all URLs"
+  [filename]
+  (if (.exists (io/file filename))
+    (let [base-name (get-base-name filename)
+          lines (str/split-lines (slurp filename))
+          urls (filter (complement str/blank?) lines)
+          url-count (count urls)
+          use-numbering? (> url-count 1)]
+      (println (str "Processing " url-count " URLs from " filename))
+      (println (str "Output prefix: " base-name))
+      (println "")
+      (doall
+        (map-indexed
+          (fn [idx url]
+            (download-url (str/trim url) base-name (inc idx) use-numbering?))
+          urls))
+      (println "\nAll downloads completed!"))
+    (do
+      (println (str "Error: File '" filename "' not found"))
+      (System/exit 1))))
+
+(def cli-spec
+  {:args->opts [:filename]
+   :spec {:help {:desc "Show help"
+                 :alias :h}}
+   :error-fn (fn [{:keys [spec type cause msg option] :as data}]
+               (if (= :org.babashka/cli type)
+                 (case cause
+                   :missing-required-arg
+                   (println "Missing required argument: filename")
+                   :unknown-option
+                   (println (str "Unknown option: " option))
+                   (println msg))
+                 (throw (ex-info msg data)))
+               (System/exit 1))})
+
+(defn main
+  "Main function - entry point"
+  [opts]
+  (cond
+    (:help opts)
+    (do
+      (println "vdl - Video Download List")
+      (println "")
+      (println "Usage: ./vdl <filename>")
+      (println "")
+      (println "Arguments:")
+      (println "  filename    Text file containing URLs (one per line)")
+      (println "")
+      (println "Options:")
+      (println "  -h, --help  Show this help message")
+      (println "")
+      (println "Example: ./vdl refs.txt")
+      (println "")
+      (println "The script will read URLs from the file and download each one using yt-dlp")
+      (println "Output format: <basename>-<line_number> (e.g., refs-01, refs-02, etc.)"))
+
+    (:filename opts)
+    (process-file (:filename opts))
+
+    :else
+    (do
+      (println "Error: Missing required argument: filename")
+      (println "Use --help for usage information")
+      (System/exit 1))))
+
+(when (= *file* (System/getProperty "babashka.file"))
+  (main (cli/parse-opts *command-line-args* cli-spec)))

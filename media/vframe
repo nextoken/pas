@@ -1,0 +1,7 @@
+#!/bin/bash
+# @pas-executable
+# Extract a single frame from a video at a specific time.
+
+ffmpeg -i $1 -ss $2 -f image2 -vframes 1 $3
+
+# ffmpeg -ss 00:00:12.3 -i sting-ray-capcut-upscaled.mp4 -vframes 1 -q:v 2 sting-ray-at-12.3s.jpg

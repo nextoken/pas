@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+# @pas-executable
+"""
+Split the selected mp3 into 2 parts at a time position (default 1.5 secs).
+Use the 1st part as one file, and then merge the 2nd part with other mp3s.
+"""
+
+import sys, subprocess, os, shutil
+# Removed unused 'commands' module and updated shebang to python3
+mp3_to_slice = sys.argv[1]
+reverse = False
+
+soxi_path = shutil.which('soxi') or 'soxi'
+mp3splt_path = shutil.which('mp3splt') or 'mp3splt'
+
+def sec2time(t): # 1.5 -> 00.01.50, assume input is d.d
+    return '00.' + t.center(5,'0')
+
+slicing_point = '00.01.50' # default slicing point 1.5s
+
+if (len(sys.argv) > 2):
+    slicing_point = sec2time(sys.argv[2])
+
+if (len(sys.argv) > 3):
+    reverse = True
+
+def time_convert(s): # 00:00:00:00 -> 00.00.00 (mm.ss.hundredth)
+    return '.'.join(s.split(':')[1:])
+
+path = os.path.dirname(os.path.abspath(mp3_to_slice))
+log_file = os.path.join(path,'slice.log')
+
+def slicing_point_from_end(duration,length):
+    #print duration, length
+    return sec2time('%.02f' % (float('.'.join(duration.split('.')[1:])) - float('.'.join(length.split('.')[1:]))))
+
+with open(log_file, 'w') as log:
+    log.write('selected mp3: %s\n' % mp3_to_slice)
+    cmd_mp3_duration = '%s -d %s' % (soxi_path, mp3_to_slice)
+    p = subprocess.Popen(cmd_mp3_duration, stdout=subprocess.PIPE, shell=True)
+    mp3_duration = time_convert(p.communicate()[0].strip().decode('utf-8'))
+    log.write('mp3 duration: %s\n' % mp3_duration)
+    os.chdir(path)
+    if reverse: # calculate slicing point from end
+        slicing_point = slicing_point_from_end(mp3_duration,slicing_point)
+    cmd = '%s -o @f_@n 00.00.00 %s %s %s' % (mp3splt_path, slicing_point, mp3_duration, mp3_to_slice)
+    log.write('cmd: %s\n' % cmd)
+    subprocess.call(cmd, shell=True)
+

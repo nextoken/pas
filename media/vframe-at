@@ -1,0 +1,22 @@
+#!/bin/bash
+# @pas-executable
+# Extract video frame at a desired time using ffmpeg.
+
+v_frame_at() {
+  input_file=$1
+  time=$2
+  output_file=$3
+
+  # Check if output file is provided
+  if [ -z "$output_file" ]; then
+    # Create default output file name
+    base_name=$(basename "$input_file" .mp4)
+    output_file="${base_name}_frame_at_${time}.jpg"
+  fi
+
+  # Use ffmpeg to extract the frame
+  ffmpeg -ss "$time" -i "$input_file" -vframes 1 -q:v 2 "$output_file"
+}
+
+# Call the function with provided arguments
+v_frame_at "$@"

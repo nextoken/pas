@@ -1,0 +1,25 @@
+#!/bin/sh
+# @pas-executable
+# Use yq to update a title in a YAML template and output as JSON for video metadata.
+
+# Check if the user provided the required arguments
+if [ "$#" -ne 2 ]; then
+    echo "Usage: $0 <template_yaml> <title>"
+    exit 1
+fi
+
+# Assign input variables
+template_yaml="$1"
+title="$2"
+
+# Escape unsafe characters in the title to create a safe filename
+safe_title=$(echo "$title" | tr -cd '[:alnum:]_-')
+# Generate the output filename with .json extension
+base_name=$(basename "$template_yaml" .yaml)
+# output_json="${base_name}.json"
+output_json="${safe_title}.json"
+
+# Use yq to update the title and output as JSON
+yq e ".title = \"$title\"" -o=json "$template_yaml" > "$output_json"
+
+echo "Updated title in $template_yaml and saved to $output_json."

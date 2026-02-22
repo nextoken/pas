@@ -1,0 +1,41 @@
+#!/bin/bash
+# @pas-executable
+# Detect scenes in a video and split it into separate clips using PySceneDetect.
+
+# Default behavior: do not include list-scenes
+LIST_SCENES=""
+
+# Check for --csv flag
+if [ "$1" = "--csv" ]; then
+    LIST_SCENES="list-scenes"
+    shift # Remove the flag from arguments
+fi
+
+# Check if exactly one argument (the MP4 file) is provided
+if [ $# -ne 1 ]; then
+    echo "Usage: vsplit_scene [--csv] <mp4_file>"
+    exit 1
+fi
+
+# Check if the input file exists
+if [ ! -f "$1" ]; then
+    echo "Error: File '$1' does not exist."
+    exit 1
+fi
+
+# Check if the input file has .mp4 extension
+if [[ ! "$1" =~ \.mp4$ ]]; then
+    echo "Error: Input file must be an MP4 file (e.g., video.mp4)."
+    exit 1
+fi
+
+# Run PySceneDetect with custom filename template (removes "Scene" from output)
+scenedetect -i "$1" detect-content $LIST_SCENES split-video -hq -f '$VIDEO_NAME-$SCENE_NUMBER'
+
+# Check if the command executed successfully
+if [ $? -eq 0 ]; then
+    echo "Video splitting completed successfully for '$1'."
+else
+    echo "Error: Video splitting failed for '$1'."
+    exit 1
+fi

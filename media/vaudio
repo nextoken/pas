@@ -1,0 +1,26 @@
+#!/bin/sh
+# @pas-executable
+# Add background audio to a video file with optional delay and looping.
+
+if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
+  echo "Usage: $0 input.mp4 input_audio.mp3 [delay_in_seconds] [loop]"
+  exit 1
+fi
+
+INPUT_VIDEO="$1"
+INPUT_AUDIO="$2"
+DELAY="${3:-0}"
+LOOP="${4:-no}"
+DELAY_MS=$(expr $DELAY \* 1000)
+
+if [ "$LOOP" = "loop" ]; then
+  OUTPUT_VIDEO="${INPUT_VIDEO%.*}_audio_at_${DELAY}s_loop.mp4"
+  ffmpeg -i "$INPUT_VIDEO" -stream_loop -1 -i "$INPUT_AUDIO" \
+  -filter_complex "[1]adelay=${DELAY_MS}|${DELAY_MS}[aud]" \
+  -map 0:v -map "[aud]" -shortest -c:v copy -c:a aac "$OUTPUT_VIDEO"
+else
+  OUTPUT_VIDEO="${INPUT_VIDEO%.*}_audio_at_${DELAY}s.mp4"
+  ffmpeg -i "$INPUT_VIDEO" -i "$INPUT_AUDIO" \
+  -filter_complex "[1]adelay=${DELAY_MS}|${DELAY_MS}[aud]" \
+  -map 0:v -map "[aud]" -c:v copy -c:a aac "$OUTPUT_VIDEO"
+fi

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ppui"
+version = "2026.01.24"
+description = "Python Process User Intent: A high-level abstract UI system (TUI, Web, Voice)"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    { name = "Next Token", email = "nextoken@gmail.com" }
+]
+dependencies = [
+    "rich>=13.0.0",
+    "prompt-toolkit>=3.0.0",
+    "questionary>=2.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/nextoken/pas"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ppui"]

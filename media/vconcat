@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+# @pas-executable
+"""
+Concatenate multiple video files using FFmpeg's filter_complex.
+
+This is a general-purpose tool for joining specific video files together.
+It supports wildcard expansion (e.g., *.mp4) and optional muting of audio.
+"""
+
+import argparse
+import glob
+import os
+import subprocess
+import sys
+
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Concatenate multiple video files using FFmpeg.",
+        epilog="Examples:\n"
+               "  vconcat *.mp4\n"
+               "  vconcat a.mp4 b.mp4 c.mp4\n"
+               "  vconcat a.mp4 b.mp4 -o custom_output_name.mp4",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("inputs", nargs="+", help="Input video files (e.g., a.mp4 b.mp4)")
+    parser.add_argument("-o", "--output", help="Custom output filename (e.g., out.mp4)")
+    parser.add_argument("-m", "--mute", action="store_true", help="Concatenate videos without audio (ignore audio tracks)")
+    return parser.parse_args()
+
+def expand_wildcards(inputs):
+    """Expand wildcards in input list and filter for existing .mp4 files."""
+    expanded = []
+    for arg in inputs:
+        files = glob.glob(arg) if "*" in arg else [arg]
+        for file in files:
+            if os.path.isfile(file) and file.lower().endswith(".mp4"):
+                expanded.append(file)
+            elif os.path.isfile(file):
+                print(f"Warning: '{file}' is not an .mp4 file, skipping.", file=sys.stderr)
+            else:
+                print(f"Warning: '{file}' does not exist, skipping.", file=sys.stderr)
+    return expanded
+
+def generate_default_output(inputs):
+    """Generate default output name by joining input basenames with '+'."""
+    basenames = [os.path.splitext(os.path.basename(f))[0] for f in inputs]
+    return "+".join(basenames) + ".mp4"
+
+def build_ffmpeg_command(inputs, output, mute=False):
+    """Build the FFmpeg command for concatenation as a list."""
+    if len(inputs) < 2:
+        print("Error: At least two input files are required for concatenation.", file=sys.stderr)
+        sys.exit(1)
+
+    # Build input args and filter complex
+    cmd = ["ffmpeg"]
+    for i, input_file in enumerate(inputs):
+        cmd.extend(["-i", input_file])
+    filter_parts = [f"[{i}:v]" + ("" if mute else f"[{i}:a]") for i in range(len(inputs))]
+    if mute:
+        filter_complex = "".join([f"[{i}:v]" for i in range(len(inputs))]) + f"concat=n={len(inputs)}:v=1:a=0[v]"
+        cmd.extend(["-filter_complex", filter_complex, "-map", "[v]", output])
+    else:
+        filter_complex = "".join([f"[{i}:v][{i}:a]" for i in range(len(inputs))]) + f"concat=n={len(inputs)}:v=1:a=1[v][a]"
+        cmd.extend(["-filter_complex", filter_complex, "-map", "[v]", "-map", "[a]", output])
+
+    return cmd
+
+def main():
+    # Parse arguments
+    args = parse_args()
+
+    # Expand wildcards and validate inputs
+    inputs = expand_wildcards(args.inputs)
+    if len(inputs) < 2:
+        print("Error: At least two valid input files are required.", file=sys.stderr)
+        sys.exit(1)
+
+    # Determine output filename
+    output = args.output if args.output else generate_default_output(inputs)
+    if not output.lower().endswith(".mp4"):
+        output += ".mp4"
+
+    # Build and run FFmpeg command
+    cmd = build_ffmpeg_command(inputs, output, mute=args.mute)
+    # Format command for display, quoting args with spaces
+    display_cmd = " ".join(f'"{arg}"' if " " in arg else arg for arg in cmd)
+    print(f"Running: {display_cmd}")
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"Successfully created {output}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error: FFmpeg failed with exit code {e.returncode}.", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

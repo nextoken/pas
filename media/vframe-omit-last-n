@@ -1,0 +1,13 @@
+#!/bin/bash
+# @pas-executable
+# Trim the last few frames of a video.
+
+fn="$1"
+minus_f=2
+# of="${fn%.*}_trimmed.mp4"
+lf=$(ffprobe -v error -select_streams v:0 -show_entries stream=nb_frames -of default=nokey=1:noprint_wrappers=1 "$fn")
+of="$(pwd)/$(basename "${fn%.*}_trim_$((lf))_$((lf-minus_f)).mp4")"
+echo "Trimming $fn: $((lf)) -> $((lf-minus_f)) frames: $of"
+
+# Remove the last frame by selecting all frames except the last
+ffmpeg -loglevel error -i "$fn" -vf "select='lt(n,$((lf-minus_f)))'" -c:v libx264 -crf 18 -c:a copy "$of"

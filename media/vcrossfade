@@ -1,0 +1,28 @@
+#!/bin/bash
+# @pas-executable
+# Crossfade two videos using ffmpeg.
+
+# Read file paths from files.txt
+map_inputs=""
+xfade_filters=""
+i=0
+total_files=$(wc -l < files.txt)
+
+while IFS= read -r line; do
+    map_inputs+="-i $line "
+    
+    if [ "$i" -gt 0 ]; then
+        xfade_filters+="[v$(($i - 1))][v$i]xfade=transition=fade:duration=1:offset=$(($i - 1))[v$i]; "
+    fi
+    
+    i=$(($i + 1))
+done < files.txt
+
+# Final output mapping
+xfade_filters+="[v$((total_files - 1))]"
+
+# Construct final command
+ffmpeg_command="ffmpeg $map_inputs -filter_complex \"$xfade_filters\" -map \"[v$((total_files - 1))]\" -map 0:a -c:v libx264 -crf 23 -preset medium -c:a aac -b:a 192k output.mp4"
+
+# Execute the command
+eval $ffmpeg_command

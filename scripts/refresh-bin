@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+import os
+import sys
+from pathlib import Path
+
+# The marker we look for in scripts (standard is @pas-executable)
+MARKER = "@pas-executable"
+
+def main():
+    # Get the project root directory
+    project_root = Path(__file__).resolve().parent.parent
+    bin_dir = project_root / "bin"
+    
+    if not bin_dir.exists():
+        bin_dir.mkdir(parents=True)
+
+    print(f"Scanning for scripts in {project_root}...")
+    
+    found_scripts = []
+    
+    # Walk through the project directories
+    for root, dirs, files in os.walk(project_root):
+        # Skip hidden directories, bin, and obsolete
+        dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'bin' and d != 'obsolete']
+        
+        for file in files:
+            file_path = Path(root) / file
+            
+            # Skip non-files, the refresh-bin script itself, or legacy scripts
+            if not file_path.is_file() or file_path == Path(__file__).resolve() or file_path.name.startswith("legacy-"):
+                continue
+                
+            try:
+                with open(file_path, 'r', errors='ignore') as f:
+                    first_lines = [f.readline() for _ in range(5)]
+                    if any(MARKER in line for line in first_lines):
+                        found_scripts.append(file_path)
+            except Exception as e:
+                print(f"Error reading {file_path}: {e}")
+
+    # Remove existing symlinks in bin/
+    for item in bin_dir.iterdir():
+        if item.is_symlink() or item.is_file():
+            item.unlink()
+
+    # Create new symlinks
+    linked_count = 0
+    for script in found_scripts:
+        # Ensure the source script is executable
+        script.chmod(script.stat().st_mode | 0o111)
+        
+        # Create a relative symlink (strip .py extension for cleaner CLI usage)
+        link_name = bin_dir / script.stem
+        rel_path = os.path.relpath(script, bin_dir)
+        
+        if link_name.exists():
+            link_name.unlink()
+        link_name.symlink_to(rel_path)
+        linked_count += 1
+
+    print(f"Done. Successfully linked {linked_count} tools in {bin_dir}")
+    print("\nNote: If new tools are not appearing in tab-completion, run: rehash")
+
+if __name__ == "__main__":
+    main()
+

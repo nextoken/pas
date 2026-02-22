@@ -1,0 +1,10 @@
+.clj-kondo/
+.lsp/
+.portal/
+.git.bak/
+.env.local
+__pycache__/
+.eggs/
+dist/
+build/
+.editable.*

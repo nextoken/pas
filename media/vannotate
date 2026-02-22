@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+# @pas-executable
+"""
+Annotate videos with text using ffmpeg.
+"""
+import subprocess
+import argparse
+import os
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Annotate videos with text using ffmpeg',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  vannotate video.mp4 "@CutenessBay"
+  vannotate input.mp4 "Sample Text" -f Helvetica -o output.mp4
+  vannotate vgen-klingai-720p-trim.mp4 "@CutenessBay" -o Hold.mp4
+        '''
+    )
+    
+    parser.add_argument('input_file', help='Input video file to annotate')
+    parser.add_argument('text', nargs='?', default='@YourHandle', help='Text to overlay on the video (default: @YourHandle)')
+    parser.add_argument('-f', '--font', default='Arial', help='Font to use for text (default: Arial)')
+    parser.add_argument('-o', '--output', help='Output file name (default: annotated_INPUT_FILE)')
+    
+    args = parser.parse_args()
+    
+    # Check if input file exists
+    if not os.path.isfile(args.input_file):
+        print(f"Error: Input file '{args.input_file}' does not exist", file=sys.stderr)
+        sys.exit(1)
+    
+    # Set default output file if not specified
+    if not args.output:
+        basename, ext = os.path.splitext(args.input_file)
+        args.output = f"annotated_{os.path.basename(basename)}{ext}"
+    
+    # Build ffmpeg command
+    cmd = [
+        'ffmpeg',
+        '-i', args.input_file,
+        '-vf', f"drawtext=font='{args.font}':text='{args.text}':fontcolor=white:fontsize=24:x=w-text_w-10:y=h-text_h-10",
+        '-codec:a', 'copy',
+        args.output
+    ]
+    
+    print(f"Annotating video: {args.input_file}")
+    print(f"Text: {args.text}")
+    print(f"Font: {args.font}")
+    print(f"Output: {args.output}")
+    
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"Video annotation complete: {args.output}")
+    except subprocess.CalledProcessError as e:
+        print(f"Error running ffmpeg: {e}", file=sys.stderr)
+        sys.exit(1)
+    except FileNotFoundError:
+        print("Error: ffmpeg not found. Please install ffmpeg.", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
+
+
