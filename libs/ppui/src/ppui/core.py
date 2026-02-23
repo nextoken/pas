@@ -252,7 +252,15 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 def prompt_toolkit_menu(choices, style=None, hotkeys=None, default_idx=0):
-    """Interactive selection menu supporting arrow keys and immediate hotkeys."""
+    """
+    Interactive selection menu supporting arrow keys and immediate hotkeys.
+
+    Accepts either:
+    - The return value of format_menu_choices(...) (numeric-indexed: 01., 02., …), or
+    - A list built with choice() (e.g. for shortcut-indexed menus: choice("q. Quit", "quit"),
+      choice("p. Play/Pause", "toggle")). Hotkeys are derived from the prefix before the first
+      dot in each title; use this when you do *not* want "01." prepended.
+    """
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.application import Application
     from prompt_toolkit.layout import Layout
@@ -344,8 +352,30 @@ def prompt_toolkit_menu(choices, style=None, hotkeys=None, default_idx=0):
     app = Application(layout=layout, key_bindings=kb, style=style, full_screen=False)
     return app.run()
 
+def choice(title: str, value: Any) -> Any:
+    """
+    Build a single menu choice for shortcut-indexed menus. Use with prompt_toolkit_menu()
+    when you want labels like "q. Quit", "p. Play/Pause" without numeric prefixes (01., 02., …).
+    Returns a Choice instance; questionary remains internal to ppui.
+    """
+    import questionary
+    return questionary.Choice(title=title, value=value)
+
+
 def format_menu_choices(items: List[Any], title_field: Optional[str] = None, value_field: Optional[str] = None) -> List[Any]:
-    """Prepare a list of items for `prompt_toolkit_menu` by adding index numbers and hotkeys."""
+    """
+    Prepare a list of items for `prompt_toolkit_menu` by adding numeric indices and hotkeys.
+
+    Prepends numeric indices to each item: 1., 2., … 9. when there are at most 9 options;
+    when there are 10 or more, uses zero-padded two (or more) digits so 01., 02., … 09.,
+    10., 11., … so the column aligns and sorts correctly. Use this when you want
+    a **numeric-indexed** menu (e.g. main menu with many options). When you want a
+    **shortcut-indexed** menu where labels should show only the shortcut (e.g. "q. Quit",
+    "p. Play/Pause", "0."–"9.", "b. Back"), do *not* use this function—it would produce
+    "01. q. Quit" instead of "q. Quit". For shortcut-only menus, use choice("q. Quit", "quit")
+    (etc.) and pass the list to prompt_toolkit_menu(choices). Hotkeys are derived from the
+    prefix before the first dot. (questionary remains internal to ppui.)
+    """
     import questionary
     
     special_keywords = {

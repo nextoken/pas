@@ -28,7 +28,63 @@ from rich.panel import Panel
 CONNECT_TIMEOUT = 15
 SSHS_CONFIG_SERVICE = "sshs"
 DEFAULT_REMOTE_SHELL = "zsh"
+# SSH options that consume the next argv token (so we don't treat it as target)
+SSH_OPTIONS_WITH_VALUE = frozenset(("-i", "-o", "-L", "-R", "-D", "-l", "-p", "-E", "-F", "-J", "-S", "-c", "-m", "-M", "-Q", "-w"))
 # ---------------------
+
+
+def _find_target_and_args(argv: list[str]) -> tuple[str | None, list[str], list[str]]:
+    """
+    Find the first connection target in argv (user@host or hostname) and split into
+    leading_ssh_args, target, trailing_ssh_args. Returns (target, leading, trailing)
+    or (None, [], []) if no target found.
+    """
+    if not argv:
+        return None, [], []
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in SSH_OPTIONS_WITH_VALUE:
+            i += 2  # skip option and its value
+            continue
+        if tok.startswith("-"):
+            i += 1
+            continue
+        # tok does not start with - and is not a known option value -> treat as target
+        target = tok
+        leading = argv[:i]
+        trailing = argv[i + 1:]
+        return target, leading, trailing
+    return None, [], []
+
+
+def _parse_local_ports_from_l_args(ssh_args: list[str]) -> list[int]:
+    """Parse -L specs and return list of local port numbers. -L can be '-L spec' or next token."""
+    ports = []
+    i = 0
+    while i < len(ssh_args):
+        arg = ssh_args[i]
+        if arg == "-L":
+            if i + 1 < len(ssh_args):
+                spec = ssh_args[i + 1]
+                # [bind_address:]port:host:hostport -> local port is first or second field
+                parts = spec.split(":")
+                if len(parts) >= 2:
+                    # port:host:hostport -> port is parts[0]
+                    # bind:port:host:hostport -> port is parts[1]
+                    try:
+                        port = int(parts[1]) if len(parts) == 4 else int(parts[0])
+                        if 1 <= port <= 65535:
+                            ports.append(port)
+                    except ValueError:
+                        pass
+                i += 2
+            else:
+                i += 1
+        else:
+            i += 1
+    return ports
+
 
 def show_summary():
     """Display a brief summary of the tool's capabilities."""
@@ -60,10 +116,15 @@ def main():
         console.print("\n[bold yellow]Usage:[/bold yellow] xssh [user@]hostname [ssh_args...] [--cf] [--no-cf] [--shell SHELL] [--set-shell SHELL]")
         sys.exit(1)
 
-    target = sys.argv[1]
-    ssh_args = list(sys.argv[2:])
+    # Target can appear anywhere in argv (e.g. xssh -N -L 8080:127.0.0.1:8080 user@host)
+    target, leading, trailing = _find_target_and_args(sys.argv[1:])
+    if not target:
+        show_summary()
+        console.print("\n[bold red]No connection target (user@host or hostname) found in arguments.[/bold red]")
+        sys.exit(1)
+    ssh_args = leading + trailing
 
-    # Flag checks
+    # Flag checks (xssh-only; strip from ssh_args so they are not passed to ssh)
     force_cf = "--cf" in ssh_args
     force_no_cf = "--no-cf" in ssh_args
     no_profile = "--no-profile" in ssh_args
@@ -113,10 +174,8 @@ def main():
             identity_opts = ["-i", ssh_args[idx + 1]]
             ssh_args = [a for i, a in enumerate(ssh_args) if i != idx and i != idx + 1]
 
-    # If a remote command was given, wrap it in shell -l -i -c "..."
-    # -l = login (sources .zprofile etc.), -i = interactive (sources .zshrc so PATH with ~/bin_pas etc. is set)
-    # Pass as a single string so the remote gets one -c argument (e.g. "pas upgrade" not just "pas").
-    if ssh_args:
+    # Only wrap in shell -l -i -c when there is a remote command. Do NOT wrap for port-forwarding only (-N -L etc.).
+    if ssh_args and "-N" not in ssh_args:
         cmd_str = " ".join(ssh_args)
         remote_cmd = f"{remote_shell} -l -i -c {shlex.quote(cmd_str)}"
         ssh_args = [remote_cmd]
@@ -211,6 +270,12 @@ def main():
             console.print(f"[bold blue]DEBUG:[/bold blue] Running: {' '.join(cmd)}")
 
         return subprocess.run(cmd)
+
+    # When -L is used, print link before connecting so user can open after tunnel is up
+    local_ports = _parse_local_ports_from_l_args(ssh_args)
+    if local_ports:
+        for port in local_ports[:3]:  # show up to first 3
+            console.print(f"When connected, open: [bold]http://127.0.0.1:{port}[/bold]")
 
     # Try initial connection
     # If --no-profile is passed, we allow password auth immediately to behave like standard SSH.

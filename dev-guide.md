@@ -94,8 +94,8 @@ def main():
 **All interactive menus MUST use the standardized menu system from `helpers/tui.py` (exposed via `helpers/core.py`).** This ensures consistent UX, proper hotkey support, and accessibility.
 
 **Requirements:**
-- **Always** use `format_menu_choices()` to prepare menu items (handles index padding and hotkey formatting)
-- **Always** use `prompt_toolkit_menu()` for displaying menus (supports arrow keys and multi-digit hotkeys)
+- Use `format_menu_choices()` when the menu should show **numeric** indices (01., 02., …). Use `choice()` (from `helpers.core` / ppui) and pass the list to `prompt_toolkit_menu()` when the menu should show **shortcut** indices only (q., p., 0–9, b.)—see "Shortcut-indexed vs numeric-indexed" below. questionary remains internal to ppui.
+- **Always** use `prompt_toolkit_menu()` for displaying menus (supports arrow keys and hotkeys)
 - **Every menu** must include a `[Quit]` option (mapped to `q`) for immediate exit
 - **Every sub-menu** (after initial tool startup/auth) must include a `[Back]` option (mapped to `b`)
 
@@ -119,6 +119,10 @@ if not selected or selected == "quit":
 ```
 
 **DO NOT** use plain `input()` or `print()` for menu selection. The standardized system provides better UX with arrow key navigation, consistent formatting, and proper hotkey handling.
+
+**Shortcut-indexed vs numeric-indexed menus:**
+- **`format_menu_choices()`** prepends numeric indices (`01.`, `02.`, …) to each item. Use it for main menus where you want "01. Option A", "02. Option B", and selection by number or arrow keys.
+- When a menu is **shortcut-indexed** by design (e.g. **q.** Quit, **p.** Play/Pause, **0.**–**9.** Seek, **b.** Back), the label should show that shortcut only—e.g. **"q. Stop tunnel and return to menu"**—not **"01. q. Stop tunnel..."**. In that case **do not** use `format_menu_choices()`. Build the list with `choice("q. ...", "quit")` from `helpers.core` (ppui; questionary stays internal to ppui) and pass it to `prompt_toolkit_menu(choices)`. Reference: `utils/xtunnel.py`, `utils/rtsp-ops.py`.
 
 ### 6. Shared Description for -h and Panel
 **Keep the tool’s identity and descriptions in one place** so the CLI name, panel title, `pas list`, and `-h` stay consistent. User-specific info and argument options stay separate.
@@ -211,8 +215,8 @@ Check `helpers/core.py` and `helpers/cloudflare.py` for shared functionality. **
 - `load_env_local()` / `save_env_local()`: For managing local secrets in `.env.local`.
 - `load_pas_config(service)` / `save_pas_config(service, data)`: For managing persistent service-specific data in `~/.pas/`.
 - `prompt_yes_no()`: For interactive confirmations.
-- `format_menu_choices(items, ...)`: **Always** use this to prepare items for a menu. It handles index padding and hotkey formatting.
-- `prompt_toolkit_menu(choices, hotkeys=...)`: **Always** use this for CLI selection menus. It supports arrow keys and multi-digit hotkeys.
+- `format_menu_choices(items, ...)`: Use for menus that should show numeric indices (01., 02., …). For shortcut-only menus (q., p., 0–9, b.), use `choice(title, value)` and pass the list to `prompt_toolkit_menu()`—see section 5 "Shortcut-indexed vs numeric-indexed". questionary is internal to ppui.
+- `prompt_toolkit_menu(choices, hotkeys=...)`: **Always** use this for CLI selection menus. It supports arrow keys and hotkeys.
 - `copy_to_clipboard(text)`: For system-level clipboard support.
 - `run_command(cmd_list)`: For consistent subprocess execution with output capture.
 - **Cloudflare (New)**: Use `helpers/cloudflare.py` for all Cloudflare API interactions (Tunnels, DNS, Zero Trust). This module provides robust error handling and idempotent operations (like `update_dns_record`).
@@ -221,7 +225,7 @@ Check `helpers/core.py` and `helpers/cloudflare.py` for shared functionality. **
 
 When acting as an AI coding agent for this repository:
 1. **Consolidation First**: Before implementing a UI element, config handler, or system utility, check `helpers/core.py`. Do not reinvent common patterns.
-2. **Standardized Menus (MANDATORY)**: **ALL** CLI menus MUST use `format_menu_choices` and `prompt_toolkit_menu` from `helpers/core.py`. Never use plain `input()` or `print()` for menu selection. See section 5 above for details.
+2. **Standardized Menus (MANDATORY)**: **ALL** CLI menus MUST use `prompt_toolkit_menu` from `helpers/core.py`; use `format_menu_choices` for numeric-indexed menus (01., 02., …) or `choice()` for shortcut-indexed menus (q., p., 0–9, b.) so the display shows the shortcut only, not "01. q. ...". questionary stays internal to ppui. Never use plain `input()` or `print()` for menu selection. See section 5 above for details.
     - **Universal Hotkeys**: Every menu level must include a `[Quit]` option (mapped to **`q`**) for immediate exit. Every level *after* the initial tool startup/auth must also include a `[Back]` option (mapped to **`b`**) to return to the previous context or exit gracefully.
 3. **Security Awareness**: Never store raw tokens or secrets in JSON files. Leverage the existing "secretization" logic in `helpers/core.py`. The toolkit automatically handles Keychain storage on macOS and provides heuristics for URL-based keys (slashes/dots).
 4. **Self-Documentation**: Always include a Rich Panel summary at the start of new scripts as per the "Capability Summary" section.

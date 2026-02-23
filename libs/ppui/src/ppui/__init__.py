@@ -1,4 +1,5 @@
 from .core import (
+    choice,
     console,
     prompt_yes_no,
     copy_to_clipboard,
@@ -17,6 +18,7 @@ from .base import (
 )
 
 __all__ = [
+    "choice",
     "console",
     "prompt_yes_no",
     "copy_to_clipboard",

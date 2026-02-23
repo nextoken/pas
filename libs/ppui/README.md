@@ -56,10 +56,10 @@ def main():
   - Application code should express *what the user is choosing or providing*, not *how it is rendered*.
 
 - **Allowed imports in application code (e.g. `services/*`, `media/*`, `utils/*`):**
-  - From `ppui`:
+  - From `ppui` (or `helpers.core` in PAS):
     - `Menu`, `UIElement`, `Selection`, `Option`, `Presentable`
     - `CodeBlock`, `DataTable`, `PanelSection` for high-level code/table/section rendering
-    - `prompt_yes_no`, `console`, `prompt_toolkit_menu`, `format_menu_choices`, `copy_to_clipboard`
+    - `prompt_yes_no`, `console`, `prompt_toolkit_menu`, `format_menu_choices`, `choice`, `copy_to_clipboard`
   - From `helpers.core`:
     - `run_command`, `load_pas_config`, `save_pas_config`, and other non-UI helpers.
 
@@ -68,8 +68,13 @@ def main():
     - `from rich.panel import Panel`
     - `from rich.syntax import Syntax`
     - `from rich.table import Table`
-  - Direct `prompt_toolkit` or `questionary` usage.
+  - Direct `prompt_toolkit` usage.
+  - Direct `questionary` usage; use ppui’s **`choice(title, value)`** for shortcut-indexed menu items so questionary stays internal to ppui.
   - These are **implementation details** inside PPUI, not part of the public surface for tools.
+
+- **Shortcut-indexed vs numeric-indexed menus:**
+  - **`format_menu_choices()`** prepends numeric indices (`01.`, `02.`, …) to each item. Use it for menus where you want "01. Option A", "02. Option B" and selection by number or arrows.
+  - When a menu is **shortcut-indexed** by design (e.g. **q.** Quit, **p.** Play/Pause, **0.**–**9.**, **b.** Back), the label should show only that shortcut—e.g. **"q. Stop tunnel and return to menu"**—not **"01. q. Stop tunnel..."**. In that case **do not** use `format_menu_choices()`. Build the list with **`choice("q. ...", "quit")`** (from ppui) and pass it to `prompt_toolkit_menu(choices)`. Hotkeys are derived from the prefix before the first dot. **questionary is internal to ppui**; use `choice()`, do not import questionary.
 
 - **Menu pattern to use (example):**
 

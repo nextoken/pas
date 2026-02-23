@@ -7,12 +7,13 @@ from pathlib import Path
 
 try:
     from ppui import (
-        console, 
-        prompt_yes_no, 
-        prompt_toolkit_menu, 
-        format_menu_choices, 
+        choice,
+        console,
+        prompt_yes_no,
+        prompt_toolkit_menu,
+        format_menu_choices,
         copy_to_clipboard,
-        Menu
+        Menu,
     )
 except ImportError:
     # Fallback: If ppui isn't installed in the environment,
@@ -20,12 +21,13 @@ except ImportError:
     lib_path = Path(__file__).resolve().parent.parent / "libs" / "ppui" / "src"
     if lib_path.exists() and str(lib_path) not in sys.path:
         sys.path.append(str(lib_path))
-    
+
     from ppui import (
-        console, 
-        prompt_yes_no, 
-        prompt_toolkit_menu, 
-        format_menu_choices, 
+        choice,
+        console,
+        prompt_yes_no,
+        prompt_toolkit_menu,
+        format_menu_choices,
         copy_to_clipboard,
-        Menu
+        Menu,
     )

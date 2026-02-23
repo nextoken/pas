@@ -24,12 +24,13 @@ from typing import Optional, Dict, Any, List
 
 # Re-export UI components for convenience and backward compatibility
 from .tui import (
-    console, 
-    prompt_yes_no, 
-    prompt_toolkit_menu, 
-    format_menu_choices, 
+    choice,
+    console,
+    prompt_yes_no,
+    prompt_toolkit_menu,
+    format_menu_choices,
     copy_to_clipboard,
-    Menu
+    Menu,
 )
 from rich.panel import Panel
 

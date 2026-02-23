@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ppui"
-version = "2026.01.24"
+version = "2026.02.23"
 description = "Python Process User Intent: A high-level abstract UI system (TUI, Web, Voice)"
 readme = "README.md"
 requires-python = ">=3.8"
