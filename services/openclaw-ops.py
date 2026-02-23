@@ -34,8 +34,9 @@ from rich.table import Table
 OPENCLAW_DOCS_URL = "https://github.com/openclaw/openclaw"
 HOMEBREW_INSTALL_URL = "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 NVM_INSTALL_URL = "https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh"
-# User Homebrew prefix (per-user install, no sudo)
+# User Homebrew prefixes (per-user install, no sudo)
 USER_HOMEBREW_PREFIX = Path.home() / ".local"
+USER_HOMEBREW_ALT = Path.home() / "homebrew"  # standard install-to-home path
 # System Homebrew prefixes
 SYSTEM_BREW_PREFIXES = ("/opt/homebrew", "/usr/local")
 # Required Python minor for PAS alignment
@@ -80,25 +81,30 @@ def _run(
 
 
 def check_homebrew_personalized() -> Tuple[bool, str]:
-    """Check that Homebrew is available and preferably user-installed (e.g. ~/.local)."""
-    # Prefer user prefix first
-    brew_user = USER_HOMEBREW_PREFIX / "bin" / "brew"
-    if brew_user.exists() and os.access(brew_user, os.X_OK):
-        return True, f"User Homebrew at {USER_HOMEBREW_PREFIX}"
-    # Then system brew
-    for prefix in SYSTEM_BREW_PREFIXES:
-        brew_path = Path(prefix) / "bin" / "brew"
-        if brew_path.exists() and os.access(brew_path, os.X_OK):
-            return True, f"System Homebrew at {prefix} (consider user install to ~/.local for isolation)"
-    # Try PATH
+    """Check that Homebrew is available and preferably user-installed (~/.local or ~/homebrew)."""
+    home = Path.home()
+    # 1) Prefer PATH so we see the brew the user actually uses (e.g. ~/homebrew/bin/brew)
     rc, out, _ = _run(["brew", "--version"])
     if rc == 0:
         rc2, prefix_out, _ = _run(["brew", "--prefix"])
         if rc2 == 0 and prefix_out:
-            p = Path(prefix_out).resolve()
-            if str(p).startswith(str(Path.home())):
-                return True, f"Homebrew at {p} (user)"
-            return True, f"Homebrew at {prefix_out} (system)"
+            try:
+                p = Path(prefix_out.strip()).resolve()
+            except OSError:
+                p = Path(prefix_out.strip())
+            if str(p).startswith(str(home)):
+                return True, f"User Homebrew at {p}"
+            return True, f"System Homebrew at {p}"
+    # 2) User locations on filesystem (in case PATH doesn't have brew)
+    for prefix in (USER_HOMEBREW_PREFIX, USER_HOMEBREW_ALT):
+        brew_path = prefix / "bin" / "brew"
+        if brew_path.exists() and os.access(brew_path, os.X_OK):
+            return True, f"User Homebrew at {prefix}"
+    # 3) System
+    for prefix in SYSTEM_BREW_PREFIXES:
+        brew_path = Path(prefix) / "bin" / "brew"
+        if brew_path.exists() and os.access(brew_path, os.X_OK):
+            return True, f"System Homebrew at {prefix} (consider user install to ~/.local for isolation)"
     return False, "Homebrew not found. Install to ~/.local for per-user use (see PAS installer)."
 
 
@@ -106,7 +112,12 @@ def check_pyenv() -> Tuple[bool, str]:
     """Check if pyenv is available."""
     rc, out, _ = _run(["pyenv", "--version"])
     if rc == 0:
-        return True, out or "pyenv available"
+        version = out or "pyenv available"
+        _, path_out, _ = _run(["which", "pyenv"])
+        path = (path_out or "").strip()
+        if path:
+            return True, f"{version} at {path}"
+        return True, version
     return False, "pyenv not found. Install via: brew install pyenv (and configure shell)."
 
 
@@ -115,12 +126,17 @@ def check_python_11() -> Tuple[bool, str]:
     try:
         v = sys.version_info
         if (v.major, v.minor) == REQUIRED_PYTHON_MINOR:
-            return True, f"Python {v.major}.{v.minor}.{v.micro} (current)"
+            return True, f"Python {v.major}.{v.minor}.{v.micro} (current) at {sys.executable}"
     except Exception:
         pass
     rc, out, _ = _run(["python3", "--version"])
     if rc == 0 and "3.11" in out:
-        return True, out.strip()
+        _, path_out, _ = _run(["which", "python3"])
+        path = (path_out or "").strip()
+        detail = out.strip()
+        if path:
+            detail += f" at {path}"
+        return True, detail
     rc2, out2, _ = _run(["pyenv", "versions", "--bare"])
     if rc2 == 0:
         for line in out2.splitlines():
@@ -130,32 +146,53 @@ def check_python_11() -> Tuple[bool, str]:
     return False, "Python 3.11 not found. Use pyenv: pyenv install 3.11.x (aligns with PAS)."
 
 
+def _nvm_dir() -> str:
+    """Resolve NVM_DIR or default ~/.nvm for display."""
+    d = os.environ.get("NVM_DIR", "").strip()
+    if d:
+        return d
+    return str(Path.home() / ".nvm")
+
+
 def check_nvm() -> Tuple[bool, str]:
     """Check if nvm (Node Version Manager) is available."""
-    rc, out, _ = _run(shell_cmd="source \"${NVM_DIR:-$HOME/.nvm}/nvm.sh\" 2>/dev/null; nvm --version 2>/dev/null")
+    nvm_sh = f"{_nvm_dir()}/nvm.sh"
+    rc, out, _ = _run(shell_cmd=f"source \"{nvm_sh}\" 2>/dev/null; nvm --version 2>/dev/null")
     if rc == 0 and out:
-        return True, out.splitlines()[0] if out else "nvm available"
-    rc2, out2, _ = _run(shell_cmd="[ -s \"${NVM_DIR:-$HOME/.nvm}/nvm.sh\" ] && echo ok")
+        version = out.splitlines()[0] if out else "nvm available"
+        return True, f"{version} at {_nvm_dir()}"
+    rc2, out2, _ = _run(shell_cmd=f"[ -s \"{nvm_sh}\" ] && echo ok")
     if rc2 == 0 and "ok" in (out2 or ""):
-        return True, "nvm (NVM_DIR loaded)"
+        return True, f"nvm at {_nvm_dir()}"
     return False, "nvm not found. Install from https://github.com/nvm-sh/nvm"
 
 
 def check_nvm_lts() -> Tuple[bool, str]:
     """Check if Node LTS is installed/used via nvm."""
+    nvm_sh = f"{_nvm_dir()}/nvm.sh"
     rc, out, _ = _run(
-        shell_cmd="source \"${NVM_DIR:-$HOME/.nvm}/nvm.sh\" 2>/dev/null; nvm list --no-colors 2>/dev/null | grep -E 'LTS|->' || true"
+        shell_cmd=f"source \"{nvm_sh}\" 2>/dev/null; nvm list --no-colors 2>/dev/null | grep -E 'LTS|->' || true"
     )
     if rc != 0:
         return False, "Could not run nvm list (is nvm installed and sourced?)"
     if "LTS" in (out or "") or "->" in (out or ""):
-        return True, "Node LTS available (use: nvm install --lts; nvm use --lts)"
-    rc2, out2, _ = _run(shell_cmd="source \"${NVM_DIR:-$HOME/.nvm}/nvm.sh\" 2>/dev/null; nvm use --lts 2>&1; node -v 2>/dev/null")
+        _, node_path, _ = _run(shell_cmd=f"source \"{nvm_sh}\" 2>/dev/null; which node 2>/dev/null")
+        path = (node_path or "").strip()
+        detail = "Node LTS available (use: nvm install --lts; nvm use --lts)"
+        if path:
+            detail += f" at {path}"
+        return True, detail
+    rc2, out2, _ = _run(shell_cmd=f"source \"{nvm_sh}\" 2>/dev/null; nvm use --lts 2>&1; node -v 2>/dev/null")
     if out2:
         for line in out2.splitlines():
             line = line.strip()
             if line.startswith("v") and line[1:2].isdigit():
-                return True, f"Node: {line}"
+                _, node_path, _ = _run(shell_cmd=f"source \"{nvm_sh}\" 2>/dev/null; which node 2>/dev/null")
+                path = (node_path or "").strip()
+                detail = f"Node: {line}"
+                if path:
+                    detail += f" at {path}"
+                return True, detail
     return False, "Node LTS not installed. Run: nvm install --lts"
 
 
