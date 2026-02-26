@@ -1,0 +1,25 @@
+#compdef xssh
+
+_xssh() {
+    local -a profiles
+    local config_file="$HOME/.pas/sshs.json"
+
+    # Enable substring matching and menu selection for xssh
+    # 'm:{a-zA-Z}={A-Za-z} l:|=* r:|=*' allows for case-insensitive substring matching
+    zstyle ':completion:*:xssh:*' matcher-list 'm:{a-zA-Z}={A-Za-z} l:|=* r:|=*'
+    zstyle ':completion:*:xssh:*' menu select
+
+    if [[ -f "$config_file" ]]; then
+        # Extract profile keys from sshs.json using a Python one-liner
+        profiles=($(python3 -c "import json, sys; print('\n'.join(json.load(open('$config_file')).get('profiles', {}).keys()))" 2>/dev/null))
+    fi
+
+    # Use _arguments to tell zsh that the first argument is a profile and subsequent ones are ssh_args
+    # ':profile:->profiles' means the first non-option argument is the profile
+    # '*:ssh_args:_default' means any following arguments use default file completion
+    _arguments \
+        '1:profile:compadd -a profiles' \
+        '*:ssh_args:_default'
+}
+
+_xssh "$@"

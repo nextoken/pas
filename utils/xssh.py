@@ -111,10 +111,10 @@ def _get_remote_shell(cli_shell: str | None, set_shell: str | None) -> str:
 
 
 def main():
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or "-h" in sys.argv or "--help" in sys.argv:
         show_summary()
         console.print("\n[bold yellow]Usage:[/bold yellow] xssh [user@]hostname [ssh_args...] [--cf] [--no-cf] [--shell SHELL] [--set-shell SHELL]")
-        sys.exit(1)
+        sys.exit(0 if "-h" in sys.argv or "--help" in sys.argv else 1)
 
     # Target can appear anywhere in argv (e.g. xssh -N -L 8080:127.0.0.1:8080 user@host)
     target, leading, trailing = _find_target_and_args(sys.argv[1:])

@@ -119,10 +119,10 @@ def main():
     parser.add_argument("--no-cf", action="store_true", help="Force standard VNC mode")
     
     # Check if we are being run without argparse (backwards compatibility for raw sys.argv)
-    if len(sys.argv) < 2:
+    if len(sys.argv) < 2 or "-h" in sys.argv or "--help" in sys.argv:
         show_summary()
         console.print("\n[bold yellow]Usage:[/bold yellow] xvnc hostname [local_port] [--cf] [--no-cf]")
-        sys.exit(1)
+        sys.exit(0 if "-h" in sys.argv or "--help" in sys.argv else 1)
 
     args = parser.parse_args()
     hostname = args.hostname

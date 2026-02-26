@@ -38,10 +38,6 @@ def main():
         except Exception:
             pass
     
-    if target_bin_str in path_resolved:
-        print(f"[OK] {display_bin} is already in your PATH.")
-        return
-
     # Detect shell config file
     shell_path = os.environ.get("SHELL", "")
     shell_name = os.path.basename(shell_path)
@@ -59,6 +55,29 @@ def main():
         print(f"[!] {display_bin} is NOT in your PATH.")
         print(f"Could not detect shell configuration file for {shell_name}.")
         print(f"Please manually add: export PATH=\"{display_bin}:$PATH\"")
+        return
+
+    # Completion script setup (always check this)
+    completion_dir = Path(__file__).resolve().parent.parent / "completions"
+    
+    for tool in ["xssh", "xvnc"]:
+        completion_file = completion_dir / f"_{tool}"
+        if completion_file.exists():
+            # Check if completion is already in the file
+            content = config_file.read_text() if config_file.exists() else ""
+            if str(completion_dir) not in content:
+                print(f"[i] {tool} autocompletion is NOT in your {config_file.name}.")
+                if prompt_yes_no(f"Would you like to add it to ~/{config_file.name}?", default=True):
+                    line_to_add = f'\n# {tool} autocompletion\nfpath=("{completion_dir}" $fpath)\nautoload -Uz compinit && compinit\n'
+                    try:
+                        with open(config_file, "a") as f:
+                            f.write(line_to_add)
+                        print(f"[OK] Added {tool} autocompletion to ~/{config_file.name}")
+                    except Exception as e:
+                        print(f"[XX] Failed to update ~/{config_file.name}: {e}")
+
+    if target_bin_str in path_resolved:
+        print(f"[OK] {display_bin} is already in your PATH.")
         return
 
     # Check if it's already in the file but not in the current session

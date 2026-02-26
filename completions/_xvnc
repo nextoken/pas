@@ -1,0 +1,21 @@
+#compdef xvnc
+
+_xvnc() {
+    local -a hosts
+    local config_file="$HOME/.pas/vnc-mappings.json"
+
+    # Enable substring matching and menu selection for xvnc
+    zstyle ':completion:*:xvnc:*' matcher-list 'm:{a-zA-Z}={A-Za-z} l:|=* r:|=*'
+    zstyle ':completion:*:xvnc:*' menu select
+
+    if [[ -f "$config_file" ]]; then
+        # Extract host keys from vnc-mappings.json using a Python one-liner
+        hosts=($(python3 -c "import json, sys; print('\n'.join(json.load(open('$config_file')).keys()))" 2>/dev/null))
+    fi
+
+    _arguments \
+        '1:host:compadd -a hosts' \
+        '*:args:_default'
+}
+
+_xvnc "$@"
