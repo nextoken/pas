@@ -57,7 +57,7 @@ Quickly publish local folders to GitHub:
 • [cyan]LFS Support[/cyan]: Automatically scans for and tracks large files.
 • [cyan]Clean Start[/cyan]: Optional removal of existing git config for a fresh push.
 """
-    console.print(Panel(info_text.strip(), title="gh-init-repo", border_style="blue"))
+    console.print(Panel(info_text.strip(), title="gh-repo-init", border_style="blue"))
 
 def setup_lfs():
     """Scan for large files and set up Git LFS if needed."""
@@ -266,7 +266,7 @@ def main():
     if not status_res.stdout.strip():
         console.print("\n[bold yellow][!][/bold yellow] Nothing to commit. The folder appears to be empty or all files are ignored.")
         if prompt_yes_no("Would you like to create a placeholder README.md to proceed?", default=True):
-            readme_content = f"# {repo_name}\n\nInitialized via PAS `gh-init-repo`."
+            readme_content = f"# {repo_name}\n\nInitialized via PAS `gh-repo-init`."
             Path("README.md").write_text(readme_content)
             run_command(["git", "add", "README.md"], capture_output=False)
         else:

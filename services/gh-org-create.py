@@ -35,7 +35,7 @@ This process must be completed through the GitHub web interface to select a plan
 The setup page can be found at:
 [bold blue]{GH_NEW_ORG_URL}[/bold blue]
 """
-    console.print(Panel(info_text.strip(), title="gh-create-org", border_style="blue"))
+    console.print(Panel(info_text.strip(), title="gh-org-create", border_style="blue"))
     console.print("\n")
 
     if prompt_yes_no("Would you like to open the GitHub Organization setup page in your browser?", default=True):

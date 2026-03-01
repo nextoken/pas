@@ -23,17 +23,17 @@ def main():
     tools = [
         {
             "name": "Init Repository",
-            "script": "gh-init-repo.py",
+            "script": "gh-repo-init.py",
             "desc": "Initialize a new GitHub repository from current folder"
         },
         {
             "name": "Reset History",
-            "script": "gh-reset-repo.py",
+            "script": "gh-repo-reset.py",
             "desc": "Destructively wipe and restart git history on GitHub"
         },
         {
             "name": "Transfer Ownership",
-            "script": "gh-transfer-repo.py",
+            "script": "gh-repo-transfer.py",
             "desc": "Move a repository to another organization or user"
         },
         {
@@ -53,7 +53,7 @@ def main():
         },
         {
             "name": "Create Organization",
-            "script": "gh-create-org.py",
+            "script": "gh-org-create.py",
             "desc": "Guided discovery for creating a new GitHub Organization"
         }
     ]

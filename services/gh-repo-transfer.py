@@ -59,7 +59,7 @@ Manage repository ownership and local remote updates:
 - [cyan]Auto-Sync[/cyan]: Automatically detects if a repo has moved and updates local remote URLs.
 - [cyan]Interactive Choice[/cyan]: Fetches available organizations for easy selection.
 """
-    console.print(Panel(info_text.strip(), title="gh-transfer-repo", border_style="blue"))
+    console.print(Panel(info_text.strip(), title="gh-repo-transfer", border_style="blue"))
     console.print("\n")
 
     if not check_gh_auth():

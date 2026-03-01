@@ -132,7 +132,7 @@ Destructively wipes history and restarts from current local files:
 - [cyan]Fresh Start[/cyan]: Re-initializes git, creates a new "Initial commit".
 - [cyan]Re-publish[/cyan]: Re-creates the remote repo and pushes the new state.
 """
-    console.print(Panel(info_text.strip(), title="gh-reset-repo", border_style="red"))
+    console.print(Panel(info_text.strip(), title="gh-repo-reset", border_style="red"))
     console.print("\n")
 
     gh_protocol = check_auth()
