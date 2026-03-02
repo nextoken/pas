@@ -15,6 +15,8 @@ import os
 import subprocess
 import argparse
 import re
+import shlex
+import shutil
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
@@ -32,7 +34,7 @@ from helpers.core import (
     save_pas_config,
     run_command,
     is_cloudflare_host,
-    detect_cloudflared_binary
+    detect_cloudflared_binary,
 )
 from rich.panel import Panel
 from rich.table import Table
@@ -53,7 +55,24 @@ TOOL_DESCRIPTION = "Smart rsync profile manager with Cloudflare tunnel detection
 
 # --- System Paths ---
 XSSH_PATH = Path(project_root) / "utils" / "xssh.py"
+CONNECT_TIMEOUT = 15
 # --------------------
+
+def _xssh_exec_for_subprocess() -> List[str]:
+    """Prefer installed xssh binary, fallback to script via current Python."""
+    xssh_bin = shutil.which("xssh")
+    if xssh_bin:
+        return [xssh_bin]
+    return [sys.executable, str(XSSH_PATH)]
+
+
+def _xssh_exec_for_rsync_e() -> str:
+    """Build a safe single command string for rsync -e."""
+    xssh_bin = shutil.which("xssh")
+    if xssh_bin:
+        return shlex.quote(xssh_bin)
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(XSSH_PATH))}"
+
 
 class RsyncPathCompleter(Completer):
     """
@@ -105,7 +124,7 @@ class RsyncPathCompleter(Completer):
         remote_cmd = f"ls -F -1 {path or '.'}"
         
         # We use a short timeout for responsiveness
-        cmd = [sys.executable, str(XSSH_PATH), host, remote_cmd]
+        cmd = _xssh_exec_for_subprocess() + [host, remote_cmd]
         
         try:
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
@@ -121,7 +140,7 @@ def show_summary():
         f"[bold cyan]sync-ops[/bold cyan]: {TOOL_DESCRIPTION}\n\n"
         "[bold]Capabilities:[/bold]\n"
         "• [bold]Profiles:[/bold] Save and reuse source/target pairs with optional names.\n"
-        "• [bold]Smart Detection:[/bold] Uses `xssh` to handle Cloudflare Tunnels automatically.\n"
+        "• [bold]Smart Detection:[/bold] Uses ssh + ProxyCommand for Cloudflare Tunnels (bypasses xssh for rsync).\n"
         "• [bold]Path Completion:[/bold] Tab-completion for both local and remote paths.\n"
         "• [bold]Validation:[/bold] Checks for common rsync pitfalls like trailing slashes.\n"
         "• [bold]Dry Run:[/bold] Always verify changes before execution."
@@ -195,10 +214,23 @@ def get_rsync_command(source: str, target: str, dry_run: bool = False) -> List[s
     elif ":" in target:
         remote_host = target.split(":")[0]
         
-    if remote_host and is_cloudflare_host(remote_host):
-        # We need to use the absolute path to xssh.py or ensure it's in PATH
-        # Since it's a pas-executable, 'xssh' should be in ~/bin_pas
-        cmd += ["-e", f"{sys.executable} {XSSH_PATH}"]
+    if remote_host:
+        # Use xssh to resolve the connection parameters (identity file, ProxyCommand)
+        # but don't run xssh as the remote shell directly to avoid protocol corruption.
+        xssh_cmd = _xssh_exec_for_subprocess() + [remote_host, "--ssh-args"]
+        try:
+            res = subprocess.run(xssh_cmd, capture_output=True, text=True, timeout=5)
+            if res.returncode == 0:
+                ssh_args = res.stdout.strip()
+                if ssh_args:
+                    cmd += ["-e", f"ssh {ssh_args}"]
+                else:
+                    cmd += ["-e", "ssh"]
+            else:
+                # Fallback to standard ssh if xssh fails
+                cmd += ["-e", "ssh"]
+        except Exception:
+            cmd += ["-e", "ssh"]
         
     # Normalize local paths (see _normalize_local_path) so e.g. My\ Drive -> My Drive.
     cmd += [_normalize_local_path(source), _normalize_local_path(target)]
@@ -214,7 +246,7 @@ def run_sync(source: str, target: str, profile_name: Optional[str] = None):
         console.print(f"\n[bold cyan]Dry Run Phase:[/bold cyan]")
         dry_run_cmd = get_rsync_command(source, target, dry_run=True)
         console.print(f"Command: [dim]{' '.join(dry_run_cmd)}[/dim]\n")
-        
+
         subprocess.run(dry_run_cmd)
         
         if not prompt_yes_no("\nDry run complete. Execute actual sync?", default=False):

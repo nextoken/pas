@@ -7,6 +7,7 @@ Usage: xssh [user@]hostname [ssh_args...]
 
 import shlex
 import sys
+import os
 import subprocess
 from pathlib import Path
 
@@ -86,6 +87,47 @@ def _parse_local_ports_from_l_args(ssh_args: list[str]) -> list[int]:
     return ports
 
 
+def _split_command_like_token(token: str) -> list[str]:
+    """Best-effort split for command-like single tokens."""
+    try:
+        return shlex.split(token)
+    except Exception:
+        return [token]
+
+
+def _is_rsync_server_command(ssh_args: list[str]) -> bool:
+    """
+    Detect rsync internal server mode robustly.
+
+    Rsync may pass the remote command as:
+    - ["rsync", "--server", ...]
+    - ["/usr/bin/rsync", "--server", ...]
+    - ["rsync --server ..."]  (single token)
+    - ["env VAR=... rsync --server ..."] (single token)
+    """
+    if not ssh_args:
+        return False
+
+    tokens = ssh_args[:]
+    if len(tokens) == 1 and " " in tokens[0]:
+        tokens = _split_command_like_token(tokens[0])
+
+    # Also handle wrapper-like forms where command is after "-c"
+    if "-c" in tokens:
+        i = tokens.index("-c")
+        if i + 1 < len(tokens):
+            cmd_tokens = _split_command_like_token(tokens[i + 1])
+            if cmd_tokens:
+                tokens = cmd_tokens
+
+    for i, tok in enumerate(tokens):
+        name = Path(tok).name
+        if name in {"rsync", "openrsync"}:
+            return i + 1 < len(tokens) and tokens[i + 1] == "--server"
+
+    return False
+
+
 def show_summary():
     """Display a brief summary of the tool's capabilities."""
     summary = (
@@ -128,12 +170,18 @@ def main():
     force_cf = "--cf" in ssh_args
     force_no_cf = "--no-cf" in ssh_args
     no_profile = "--no-profile" in ssh_args
+    no_cf_wrap = "--no-cf-wrap" in ssh_args
+    print_ssh_args = "--ssh-args" in ssh_args
     if force_cf:
         ssh_args.remove("--cf")
     if force_no_cf:
         ssh_args.remove("--no-cf")
     if no_profile:
         ssh_args.remove("--no-profile")
+    if no_cf_wrap:
+        ssh_args.remove("--no-cf-wrap")
+    if print_ssh_args:
+        ssh_args.remove("--ssh-args")
 
     debug_mode = "--debug" in ssh_args
     if debug_mode:
@@ -174,8 +222,31 @@ def main():
             identity_opts = ["-i", ssh_args[idx + 1]]
             ssh_args = [a for i, a in enumerate(ssh_args) if i != idx and i != idx + 1]
 
+    # Rsync server mode or arg-printing mode must be fully quiet/passthrough: any wrapper stdout breaks protocol.
+    rsync_server_mode = _is_rsync_server_command(ssh_args)
+    if rsync_server_mode or print_ssh_args:
+        debug_mode = False
+        # Suppress all rich/console output from xssh itself
+        console.quiet = True
+        # Also suppress any direct sys.stderr output from helpers (like secret warnings)
+        # We use a context manager or just reassign; for a script, reassignment is fine.
+        sys.stderr = open(os.devnull, 'w')
+        # Ensure we don't print anything else to stdout either
+        # We MUST NOT do this before we run the actual SSH command, as that would
+        # prevent the SSH command from communicating with the local rsync.
+        # However, we DO need to prevent the toolkit from printing anything.
+        # Let's try to capture stdout temporarily and only release it for the subprocess.
+        _original_stdout = sys.stdout
+        sys.stdout = open(os.devnull, 'w')
+        # We also need to ensure that any other code that might use sys.stderr
+        # (like the warnings module) is also silenced.
+        import warnings
+        warnings.filterwarnings("ignore")
+
     # Only wrap in shell -l -i -c when there is a remote command. Do NOT wrap for port-forwarding only (-N -L etc.).
-    if ssh_args and "-N" not in ssh_args:
+    # NEVER wrap rsync --server: it expects a clean stdout/stderr; wrapping in zsh -l -i -c causes
+    # .zshrc output to corrupt the protocol (e.g. "remote protocol -491940382").
+    if ssh_args and "-N" not in ssh_args and not rsync_server_mode and not no_cf_wrap:
         cmd_str = " ".join(ssh_args)
         remote_cmd = f"{remote_shell} -l -i -c {shlex.quote(cmd_str)}"
         ssh_args = [remote_cmd]
@@ -188,14 +259,16 @@ def main():
     elif force_no_cf:
         use_cf = False
     else:
-        use_cf = is_cloudflare_host(target)
+        # Use quiet=True for is_cloudflare_host if it's rsync server mode
+        # to prevent secret rotation warnings from load_pas_config("cf")
+        use_cf = is_cloudflare_host(target, quiet=rsync_server_mode)
     
     if debug_mode:
         console.print(f"[bold blue]DEBUG:[/bold blue] Target: {target}")
         console.print(f"[bold blue]DEBUG:[/bold blue] Cloudflare detected: {use_cf}")
 
     # --- Profile Management ---
-    config = load_pas_config(SSHS_CONFIG_SERVICE)
+    config = load_pas_config(SSHS_CONFIG_SERVICE, quiet=rsync_server_mode)
     profiles = config.get("profiles", {})
 
     # Auto-load saved key if not provided on CLI and not --no-profile
@@ -269,6 +342,11 @@ def main():
         if debug_mode:
             console.print(f"[bold blue]DEBUG:[/bold blue] Running: {' '.join(cmd)}")
 
+        if rsync_server_mode:
+            # Restore stdout for the subprocess so it can communicate with rsync
+            sys.stdout = _original_stdout
+            return subprocess.run(cmd)
+        
         return subprocess.run(cmd)
 
     # When -L is used, print link before connecting so user can open after tunnel is up
@@ -280,10 +358,20 @@ def main():
     # Try initial connection
     # If --no-profile is passed, we allow password auth immediately to behave like standard SSH.
     # Otherwise, we disable it to trigger our "Pick a Key" recovery menu if keys fail.
-    res = run_ssh(target, ssh_args, identity_opts=identity_opts, disable_password=not no_profile)
+    # If --ssh-args is passed, we don't actually run SSH, so we skip this.
+    if not print_ssh_args:
+        res = run_ssh(
+            target,
+            ssh_args,
+            identity_opts=identity_opts,
+            disable_password=(not no_profile and not rsync_server_mode),
+        )
+    else:
+        # Mock a successful response for the arg-printing logic below
+        res = subprocess.CompletedProcess(args=[], returncode=0)
     
     # If connection failed (likely auth error 255) and we hadn't already allowed passwords
-    if res.returncode == 255 and not no_profile:
+    if res.returncode == 255 and not no_profile and not rsync_server_mode:
         console.print("\n[yellow]Key authentication failed.[/yellow]")
         from helpers.core import get_ssh_keys, format_menu_choices, prompt_toolkit_menu
         
@@ -319,7 +407,7 @@ def main():
                 save_pas_config(SSHS_CONFIG_SERVICE, config)
                 console.print(f"[green][✓] Saved working SSH key profile for {target}[/green]")
 
-    # If we had a key in identity_opts and it worked, ensure it's saved
+    # If successful, save the key
     if res.returncode == 0 and identity_opts and "-i" in identity_opts:
         idx = identity_opts.index("-i")
         if idx + 1 < len(identity_opts):
@@ -330,7 +418,26 @@ def main():
                 profiles[target]["identity_file"] = resolved_key
                 config["profiles"] = profiles
                 save_pas_config(SSHS_CONFIG_SERVICE, config)
-                console.print(f"[green][✓] Profile updated with working key for {target}[/green]")
+                if not print_ssh_args:
+                    console.print(f"[green][✓] Profile updated with working key for {target}[/green]")
+
+    if print_ssh_args:
+        # Build the argument string that sync-ops can use directly with 'ssh'
+        final_args = []
+        if use_cf:
+            cloudflared_path = detect_cloudflared_binary()
+            if cloudflared_path:
+                proxy_cmd = f"{cloudflared_path} access ssh --hostname %h"
+                final_args.extend(["-o", f"ProxyCommand={shlex.quote(proxy_cmd)}"])
+        
+        if identity_opts:
+            final_args.extend(identity_opts)
+            
+        # Print to the original stdout (which we might have redirected if we were in rsync mode, 
+        # but print_ssh_args and rsync_server_mode are mutually exclusive in practice)
+        sys.stdout = sys.__stdout__
+        print(" ".join(final_args))
+        sys.exit(0)
 
     sys.exit(res.returncode)
     # --------------------------

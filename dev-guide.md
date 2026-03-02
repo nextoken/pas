@@ -50,6 +50,26 @@ The project uses a script called `scripts/refresh-bin` to manage access to tools
 - **Example**: `openclaw-ops` composes `user-ops` for creating an isolated macOS account: it runs `user-ops --list` to check if a user exists (parsing stdout) and `user-ops --create ...` with the password on stdin. See `services/openclaw-ops.py` for the pattern.
 - **Opinionated setups**: Some tools (e.g. `openclaw-ops` for OpenClaw) are **strongly opinionated**: they assume specific choices (per-user Homebrew, Python 3.11, default account name, etc.). Document this in the tool’s docstring and UI so users know to use a different workflow if their conventions differ.
 
+### SSH Parameter Discovery
+When building tools that wrap SSH-based commands (like `rsync`, `scp`, or `git`), **do not** use `xssh` as the remote shell directly. Protocol-sensitive tools often fail if the wrapper prints any text (e.g., secret rotation warnings or shell initialization messages).
+
+Instead, use the **Parameter Discovery** pattern:
+1.  **Discover**: Call `xssh <target> --ssh-args` to get the correct connection parameters (resolved identity files, Cloudflare ProxyCommands, etc.).
+2.  **Execute**: Pass these arguments to the standard `ssh` binary via the tool's native configuration flag.
+
+**Example (rsync):**
+```python
+# 1. Discover parameters via xssh
+res = subprocess.run(["xssh", target, "--ssh-args"], capture_output=True, text=True)
+ssh_args = res.stdout.strip()
+
+# 2. Use parameters with standard ssh
+# rsync -e "ssh -i /key -o ProxyCommand='...'" ...
+cmd = ["rsync", "-e", f"ssh {ssh_args}", source, target]
+subprocess.run(cmd)
+```
+This pattern preserves `xssh` profile benefits (auto-key selection, Cloudflare detection) while ensuring a clean, stable connection. Reference implementation: `services/sync-ops.py`.
+
 ## Creating a New Script
 
 To add a new script, follow these steps:

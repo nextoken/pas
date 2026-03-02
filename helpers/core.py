@@ -229,7 +229,7 @@ def _en_secretize(data: Any, service: str, path: str = "") -> Any:
         return [_en_secretize(item, service, f"{path}[{i}]") for i, item in enumerate(data)]
     return data
 
-def _de_secretize(data: Any, service: str) -> Any:
+def _de_secretize(data: Any, service: str, quiet: bool = False) -> Any:
     """
     Recursively fetch secrets from Keychain and replace 'SEC:' references with real values.
     Also handles age warnings for old secrets.
@@ -244,23 +244,24 @@ def _de_secretize(data: Any, service: str) -> Any:
                 if secret:
                     new_dict[k] = secret
                     # Check age and print warning to stderr
-                    meta = data.get(f"{k}_meta", {})
-                    created_at_str = meta.get("created_at")
-                    if created_at_str:
-                        try:
-                            created_at = datetime.datetime.fromisoformat(created_at_str)
-                            days_old = (now - created_at).days
-                            if days_old > SECRET_ROTATION_DAYS:
-                                sys.stderr.write(f"\x1b[33m\n[!] WARNING: The {k} for {service} is {days_old} days old. Consider rotating it.\x1b[0m\n")
-                        except Exception:
-                            pass
+                    if not quiet:
+                        meta = data.get(f"{k}_meta", {})
+                        created_at_str = meta.get("created_at")
+                        if created_at_str:
+                            try:
+                                created_at = datetime.datetime.fromisoformat(created_at_str)
+                                days_old = (now - created_at).days
+                                if days_old > SECRET_ROTATION_DAYS:
+                                    sys.stderr.write(f"\x1b[33m\n[!] WARNING: The {k} for {service} is {days_old} days old. Consider rotating it.\x1b[0m\n")
+                            except Exception:
+                                pass
                 else:
                     new_dict[k] = v # Keep reference if secret not found
             else:
-                new_dict[k] = _de_secretize(v, service)
+                new_dict[k] = _de_secretize(v, service, quiet=quiet)
         return new_dict
     elif isinstance(data, list):
-        return [_de_secretize(item, service) for item in data]
+        return [_de_secretize(item, service, quiet=quiet) for item in data]
     return data
 
 def detect_cloudflared_binary() -> Optional[Path]:
@@ -277,7 +278,7 @@ def detect_cloudflared_binary() -> Optional[Path]:
         return Path(which)
     return None
 
-def is_cloudflare_host(hostname: str) -> bool:
+def is_cloudflare_host(hostname: str, quiet: bool = False) -> bool:
     """
     Check if a hostname resolves to a Cloudflare Tunnel or is protected by Cloudflare Access.
     Uses multiple layers of detection:
@@ -311,7 +312,7 @@ def is_cloudflare_host(hostname: str) -> bool:
     
     # --- Layer 2: Local PAS Configuration Cache ---
     try:
-        config = load_pas_config("cf")
+        config = load_pas_config("cf", quiet=quiet)
         # Check cached SSH hosts
         if "tunnel_ssh_hosts" in config:
             for tunnel_id, cached_host in config["tunnel_ssh_hosts"].items():
@@ -374,7 +375,7 @@ def get_pas_config_dir() -> Path:
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
 
-def load_pas_config(service: str) -> Dict[str, Any]:
+def load_pas_config(service: str, quiet: bool = False) -> Dict[str, Any]:
     """
     Load JSON config for a specific service from ~/.pas/service.json.
     Automatically handles secret retrieval from Keychain if SEC: tags are found.
@@ -390,9 +391,10 @@ def load_pas_config(service: str) -> Dict[str, Any]:
                 # Re-read after migration to get the SEC: references
                 data = json.loads(config_file.read_text())
                 
-            return _de_secretize(data, service)
+            return _de_secretize(data, service, quiet=quiet)
         except json.JSONDecodeError:
-            print(f"Warning: Could not parse config for {service}. Returning empty dict.")
+            if not quiet:
+                print(f"Warning: Could not parse config for {service}. Returning empty dict.")
     return {}
 
 def get_secret_age(service: str, key_path: str) -> Optional[int]:
