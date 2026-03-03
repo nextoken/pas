@@ -32,6 +32,7 @@ from helpers.core import (
     get_gh_protocol,
     format_menu_choices,
     prompt_toolkit_menu,
+    choice,
     console
 )
 from rich.panel import Panel
@@ -141,13 +142,35 @@ def main():
 
     git_info = get_git_info()
     git_dir = Path(".git")
+    is_submodule_flow = False
     
     if git_info or git_dir.exists():
         console.print(f"\n[cyan]Current folder is already a git repository.[/cyan]")
         if git_info and git_info['origin']:
             console.print(f"  Remote origin: [bold]{git_info['origin']}[/bold]")
             
-        if prompt_yes_no("Do you want to KEEP the existing git configuration?", default=True):
+        # Check if there are uncommitted changes
+        status_res = run_command(["git", "status", "--porcelain"])
+        has_uncommitted = bool(status_res.stdout.strip())
+        
+        if has_uncommitted:
+            console.print("[yellow]You have uncommitted changes in the current repository.[/yellow]")
+            
+            menu_items = [
+                choice("Initialize Submodule (create separate new gh repo)", "submodule"),
+                choice("Keep Current Config and quit", "quit")
+            ]
+            
+            # We use prompt_toolkit_menu directly with choice() objects as per dev-guide
+            action = prompt_toolkit_menu(menu_items, default_idx=0)
+            
+            if action == "submodule":
+                console.print("\n[green]Proceeding to initialize as a submodule (separate repo)...[/green]")
+                is_submodule_flow = True
+            elif action == "quit" or action is None:
+                sys.exit("Aborted.")
+        
+        elif prompt_yes_no("Do you want to KEEP the existing git configuration?", default=True):
             if git_info and git_info['origin']:
                 if prompt_yes_no("Would you like to RETRY the push to the existing remote?", default=True):
                     console.print("\n[bold green]Retrying push to existing remote...[/bold green]")
@@ -187,7 +210,7 @@ def main():
     repo_name = folder_name
 
     # Try to extract defaults from existing origin if available
-    if git_info and git_info['origin']:
+    if not is_submodule_flow and git_info and git_info['origin']:
         # Match git@github.com:owner/repo.git or https://github.com/owner/repo.git
         origin_url = git_info['origin']
         match = re.search(r'github\.com[:/]([^/]+)/([^.]+)(\.git)?', origin_url)
@@ -358,8 +381,31 @@ def main():
             
         console.print(f"Setting remote 'origin' to: [cyan]{remote_url}[/cyan]")
         run_command(["git", "remote", "set-url", "origin", remote_url])
+        
+        # Handle submodule registration in parent repo
+        if is_submodule_flow and git_info and git_info['root']:
+            parent_root = Path(git_info['root'])
+            current_dir = Path.cwd()
+            
+            # If we are in a subdirectory of the parent root, register it
+            if current_dir != parent_root:
+                rel_path = current_dir.relative_to(parent_root)
+                console.print(f"\n[cyan]Registering submodule '{rel_path}' in parent repository...[/cyan]")
+                
+                # We need to run this from the parent root
+                # git submodule add <url> <path>
+                # If it's already a folder, we might need to be careful. 
+                # But since we just initialized it as its own git repo and pushed it, 
+                # 'git submodule add' from the parent should recognize it.
+                submod_cmd = ["git", "submodule", "add", "--force", remote_url, str(rel_path)]
+                res = run_command(submod_cmd, cwd=parent_root, capture_output=False)
+                
+                if res.returncode == 0:
+                    console.print(f"[green]Submodule '{rel_path}' successfully registered in .gitmodules[/green]")
+                else:
+                    console.print(f"[bold yellow]Warning:[/bold yellow] Failed to register submodule in parent repo: {res.stderr}")
     except Exception as e:
-        console.print(f"[bold yellow]Warning:[/bold yellow] Could not automatically set preferred protocol: {e}")
+        console.print(f"[bold yellow]Warning:[/bold yellow] Could not automatically set preferred protocol or register submodule: {e}")
 
     console.print("\n[bold green]Success![/bold green] Repository has been created and initialized.")
     

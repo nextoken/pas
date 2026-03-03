@@ -23,10 +23,12 @@ if project_root not in sys.path:
 from helpers.core import (
     console,
     format_menu_choices,
+    load_pas_config,
     prompt_toolkit_menu,
     prompt_yes_no,
     run_command,
 )
+from helpers.tui import DataTable
 from rich.panel import Panel
 from rich.table import Table
 
@@ -52,6 +54,9 @@ TOOL_DESCRIPTION = (
     "nvm, and Node LTS. Reminds you to use an isolated email and GitHub account—not your primary identity. "
     "Setup is strongly opinionated; use another workflow if you need different conventions."
 )
+# Safe Upgrade Configuration
+OPENCLAW_PLIST_PATH = Path.home() / "Library/LaunchAgents/ai.openclaw.gateway.plist"
+OPENCLAW_CONFIG_SERVICE = "openclaw-ops"
 # ---------------------
 
 
@@ -453,12 +458,142 @@ def run_environment_checks() -> None:
     console.print(table)
 
 
+def _get_plist_env_value(key: str) -> Optional[str]:
+    """Get current value of an environment variable from the plist using plutil."""
+    if not OPENCLAW_PLIST_PATH.exists():
+        return None
+    # plutil -extract EnvironmentVariables.PATH raw ~/Library/LaunchAgents/ai.openclaw.gateway.plist
+    rc, out, _ = _run(["plutil", "-extract", f"EnvironmentVariables.{key}", "raw", str(OPENCLAW_PLIST_PATH)])
+    if rc == 0:
+        return out.strip()
+    return None
+
+
+def safe_upgrade_openclaw() -> None:
+    """
+    Perform a safe upgrade:
+    1. Run 'openclaw update'
+    2. Re-apply custom environment variables from ~/.pas/openclaw-ops.json to the LaunchAgent plist.
+    3. Reload the service.
+    """
+    if sys.platform != "darwin":
+        console.print("[red]Safe Upgrade is only supported on macOS.[/red]")
+        return
+
+    config = load_pas_config(OPENCLAW_CONFIG_SERVICE)
+    custom_envs = config.get("envs", {})
+
+    if not custom_envs:
+        console.print("[yellow]No custom environment variables found in ~/.pas/openclaw-ops.json under 'envs' key.[/yellow]")
+        console.print("\n[bold]Example configuration (~/.pas/openclaw-ops.json):[/bold]")
+        example_config = {
+            "envs": {
+                "PATH": {
+                    "op": "prepend",
+                    "v": "/Users/openclaw/homebrew/bin:"
+                },
+                "http_proxy": {
+                    "op": "replace",
+                    "v": "http://127.0.0.1:7890"
+                },
+                "https_proxy": {
+                    "op": "replace",
+                    "v": "http://127.0.0.1:7890"
+                },
+                "NODE_OPTIONS": {
+                    "op": "replace",
+                    "v": "--dns-result-order=ipv4first"
+                }
+            }
+        }
+        import json
+        console.print(json.dumps(example_config, indent=2))
+        
+        if not prompt_yes_no("\nProceed with standard 'openclaw update' anyway?", default=True):
+            return
+    
+    # 1. Run openclaw update
+    console.print("[cyan]Running 'openclaw update'...[/cyan]")
+    rc, out, err = _run(["openclaw", "update"], capture=False)
+    if rc != 0:
+        console.print("[red]openclaw update failed.[/red]")
+        if not prompt_yes_no("Proceed with patching plist anyway?", default=False):
+            return
+
+    if not OPENCLAW_PLIST_PATH.exists():
+        console.print(f"[red]LaunchAgent plist not found at {OPENCLAW_PLIST_PATH}[/red]")
+        return
+
+    # 2. Preview changes
+    preview_rows = []
+    for key, settings in custom_envs.items():
+        op = settings.get("op", "replace")
+        val = settings.get("v", "")
+        current = _get_plist_env_value(key) or "(not set)"
+        
+        new_val = val
+        if op == "prepend":
+            new_val = f"{val}{current}" if current != "(not set)" else val
+        elif op == "append":
+            new_val = f"{current}{val}" if current != "(not set)" else val
+            
+        preview_rows.append([key, op, current, new_val])
+
+    if preview_rows:
+        console.print("\n[bold]Preview of Plist Environment Changes:[/bold]")
+        DataTable(
+            columns=["Key", "Operation", "Current Value", "New Value"],
+            rows=preview_rows
+        ).present()
+        
+        if not prompt_yes_no("\nApply these changes to the LaunchAgent plist?", default=True):
+            console.print("[yellow]Upgrade aborted. Plist remains unchanged.[/yellow]")
+            return
+
+        # 3. Apply changes
+        for key, settings in custom_envs.items():
+            op = settings.get("op", "replace")
+            val = settings.get("v", "")
+            
+            final_val = val
+            if op in ("prepend", "append"):
+                current = _get_plist_env_value(key)
+                if op == "prepend":
+                    final_val = f"{val}{current}" if current else val
+                else:
+                    final_val = f"{current}{val}" if current else val
+            
+            # plutil -replace EnvironmentVariables.KEY -string "VALUE" PLIST
+            rc, out, err = _run([
+                "plutil", "-replace", f"EnvironmentVariables.{key}", 
+                "-string", final_val, str(OPENCLAW_PLIST_PATH)
+            ])
+            if rc != 0:
+                console.print(f"[red]Failed to update {key}: {err or out}[/red]")
+            else:
+                console.print(f"[green]Updated {key}[/green]")
+
+    # 4. Reload service
+    console.print("[cyan]Reloading OpenClaw service...[/cyan]")
+    # launchctl bootout gui/$(id -u)/ai.openclaw.gateway 2>/dev/null
+    uid = os.getuid()
+    _run(["launchctl", "bootout", f"gui/{uid}/ai.openclaw.gateway"], capture=True)
+    
+    # launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.openclaw.gateway.plist
+    rc, out, err = _run(["launchctl", "bootstrap", f"gui/{uid}", str(OPENCLAW_PLIST_PATH)], capture=True)
+    if rc == 0:
+        console.print("[bold green]Plist patched & service reloaded successfully.[/bold green]")
+    else:
+        console.print(f"[red]Failed to reload service: {err or out}[/red]")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=TOOL_DESCRIPTION)
     parser.add_argument("--checks", action="store_true", help="Run environment checks and exit")
     parser.add_argument("--warning", action="store_true", help="Show account isolation warning and exit")
     parser.add_argument("--setup", action="store_true", help="Set up all personalized deps (prompts for account consent)")
     parser.add_argument("--create-account", nargs="?", const=DEFAULT_OPENCLAW_USER, metavar="USER", help="Create isolated macOS user (default: openclaw); warns if exists")
+    parser.add_argument("--safe-upgrade", action="store_true", help="Safe Upgrade: openclaw update + restore custom envs in plist")
     args = parser.parse_args()
 
     if args.checks:
@@ -472,6 +607,9 @@ def main() -> None:
         return
     if args.create_account is not None:
         create_isolated_account(args.create_account)
+        return
+    if args.safe_upgrade:
+        safe_upgrade_openclaw()
         return
 
     try:
@@ -492,6 +630,7 @@ def main() -> None:
     ))
 
     menu = [
+        {"title": "Safe Upgrade (update + restore envs)", "value": "safe_upgrade"},
         {"title": "Create isolated account (default: openclaw)", "value": "create_account"},
         {"title": "Run environment checks", "value": "checks"},
         {"title": "Show account isolation warning", "value": "warning"},
@@ -511,6 +650,8 @@ def main() -> None:
             setup_all_personalized()
         elif choice == "create_account":
             create_isolated_account(DEFAULT_OPENCLAW_USER)
+        elif choice == "safe_upgrade":
+            safe_upgrade_openclaw()
 
 
 if __name__ == "__main__":
