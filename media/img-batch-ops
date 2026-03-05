@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+"""
+@pas-executable
+Batch image conversion and resizing using macOS 'sips'.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+# Add project root to sys.path so we can find 'helpers'
+project_root = str(Path(__file__).resolve().parent.parent)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from helpers.core import (
+    console,
+    format_menu_choices,
+    prompt_toolkit_menu,
+    prompt_yes_no,
+    run_command,
+)
+from rich.panel import Panel
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+
+# --- Configuration ---
+TOOL_ID = "img-batch-ops"
+TOOL_TITLE = "Batch Image Operations"
+TOOL_SHORT_DESC = "Batch convert and resize images using macOS 'sips'."
+TOOL_DESCRIPTION = (
+    "Batch process images: convert formats (JPG, PNG, WebP, HEIC), resize, and optimize. "
+    "Uses the native macOS 'sips' tool for zero-setup performance."
+)
+
+SUPPORTED_FORMATS = ["jpeg", "png", "tiff", "gif", "jp2", "pict", "bmp", "psd", "webp", "heic"]
+# ---------------------
+
+def get_image_files(directory: Path) -> List[Path]:
+    """Get all image files in a directory."""
+    extensions = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".tiff", ".bmp", ".gif"}
+    return [p for p in directory.iterdir() if p.suffix.lower() in extensions]
+
+def process_images(
+    input_files: List[Path],
+    output_dir: Path,
+    fmt: Optional[str] = None,
+    max_width: Optional[int] = None,
+    max_height: Optional[int] = None,
+    quality: Optional[int] = None,
+) -> None:
+    """Process a list of images using sips."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Processing images...", total=len(input_files))
+        
+        for img_path in input_files:
+            output_ext = f".{fmt}" if fmt else img_path.suffix
+            # sips uses 'jpeg' for both .jpg and .jpeg
+            if output_ext.lower() == ".jpeg":
+                output_ext = ".jpg"
+                
+            out_path = output_dir / f"{img_path.stem}{output_ext}"
+            
+            cmd = ["sips"]
+            
+            if fmt:
+                # sips format names: jpeg, png, tiff, gif, jp2, pict, bmp, psd, webp, heic
+                sips_fmt = fmt.lower()
+                if sips_fmt == "jpg":
+                    sips_fmt = "jpeg"
+                cmd.extend(["-s", "format", sips_fmt])
+            
+            if max_width or max_height:
+                # --resampleHeightWidthMax
+                val = max(max_width or 0, max_height or 0)
+                cmd.extend(["--resampleHeightWidthMax", str(val)])
+            
+            if quality and (fmt == "jpeg" or fmt == "jpg"):
+                cmd.extend(["-s", "formatOptions", str(quality)])
+            
+            cmd.extend([str(img_path), "--out", str(out_path)])
+            
+            res = run_command(cmd, capture_output=True)
+            if res.returncode != 0:
+                console.print(f"[red]Error processing {img_path.name}: {res.stderr}[/red]")
+            
+            progress.advance(task)
+
+def main_menu():
+    """Main interactive menu."""
+    console.print(Panel(TOOL_DESCRIPTION, title=TOOL_TITLE, border_style="blue"))
+    
+    # 1. Get Source Directory
+    source_dir_str = input("\nEnter source directory (default: current): ").strip() or "."
+    source_dir = Path(source_dir_str).expanduser().resolve()
+    
+    if not source_dir.exists() or not source_dir.is_dir():
+        console.print(f"[red]Error: {source_dir} is not a valid directory.[/red]")
+        return
+
+    images = get_image_files(source_dir)
+    if not images:
+        console.print(f"[yellow]No images found in {source_dir}[/yellow]")
+        return
+
+    console.print(f"[green]Found {len(images)} images.[/green]")
+
+    # 2. Choose Operation
+    menu = [
+        {"title": "Convert Format (JPG, PNG, WebP, etc.)", "value": "convert"},
+        {"title": "Resize (Max Dimension)", "value": "resize"},
+        {"title": "Convert & Resize", "value": "both"},
+        {"title": "[Quit]", "value": "quit"},
+    ]
+    
+    choice = prompt_toolkit_menu(format_menu_choices(menu))
+    if not choice or choice == "quit":
+        return
+
+    # 3. Get Parameters
+    fmt = None
+    if choice in ["convert", "both"]:
+        fmt_menu = [{"title": f.upper(), "value": f} for f in ["jpg", "png", "webp", "heic"]]
+        fmt_menu.append({"title": "[Back]", "value": "back"})
+        fmt = prompt_toolkit_menu(format_menu_choices(fmt_menu))
+        if fmt == "back": return
+
+    max_dim = None
+    if choice in ["resize", "both"]:
+        dim_str = input("Enter max dimension (pixels): ").strip()
+        if dim_str.isdigit():
+            max_dim = int(dim_str)
+        else:
+            console.print("[red]Invalid dimension. Skipping resize.[/red]")
+
+    # 4. Get Target Directory
+    target_dir_str = input(f"Enter target directory (default: {source_dir}/converted): ").strip()
+    if not target_dir_str:
+        target_dir = source_dir / "converted"
+    else:
+        target_dir = Path(target_dir_str).expanduser().resolve()
+
+    # 5. Confirm and Run
+    summary = f"Processing {len(images)} images from {source_dir.name} to {target_dir.name}\n"
+    if fmt: summary += f"- Format: {fmt.upper()}\n"
+    if max_dim: summary += f"- Max Dimension: {max_dim}px\n"
+    
+    console.print(Panel(summary, title="Confirm Operations", border_style="yellow"))
+    
+    if prompt_yes_no("Proceed?", default=True):
+        process_images(images, target_dir, fmt=fmt, max_width=max_dim, max_height=max_dim)
+        console.print(f"[bold green]Done! Images saved to {target_dir}[/bold green]")
+
+def main():
+    parser = argparse.ArgumentParser(description=TOOL_DESCRIPTION)
+    parser.add_argument("source", nargs="?", help="Source directory")
+    parser.add_argument("-o", "--output", help="Output directory")
+    parser.add_argument("-f", "--format", choices=["jpg", "png", "webp", "heic"], help="Target format")
+    parser.add_argument("-s", "--size", type=int, help="Max dimension (width or height)")
+    
+    args = parser.parse_args()
+    
+    if sys.platform != "darwin":
+        console.print("[red]Error: This tool requires macOS 'sips' utility.[/red]")
+        sys.exit(1)
+
+    if args.source:
+        source_dir = Path(args.source).expanduser().resolve()
+        if not source_dir.exists() or not source_dir.is_dir():
+            console.print(f"[red]Error: {source_dir} is not a valid directory.[/red]")
+            sys.exit(1)
+            
+        images = get_image_files(source_dir)
+        if not images:
+            console.print(f"[yellow]No images found in {source_dir}[/yellow]")
+            sys.exit(1)
+            
+        target_dir = Path(args.output).expanduser().resolve() if args.output else source_dir / "converted"
+        process_images(images, target_dir, fmt=args.format, max_width=args.size, max_height=args.size)
+    else:
+        main_menu()
+
+if __name__ == "__main__":
+    main()

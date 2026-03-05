@@ -31,6 +31,7 @@ from .tui import (
     format_menu_choices,
     copy_to_clipboard,
     Menu,
+    DataTable,
 )
 from rich.panel import Panel
 

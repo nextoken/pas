@@ -111,7 +111,7 @@ def main():
 ```
 
 ### 5. Standardized Menus (MANDATORY)
-**All interactive menus MUST use the standardized menu system from `helpers/tui.py` (exposed via `helpers/core.py`).** This ensures consistent UX, proper hotkey support, and accessibility.
+**All interactive menus MUST use the standardized menu system from `helpers/core.py`.** This ensures consistent UX, proper hotkey support, and accessibility.
 
 **Requirements:**
 - Use `format_menu_choices()` when the menu should show **numeric** indices (01., 02., …). Use `choice()` (from `helpers.core` / ppui) and pass the list to `prompt_toolkit_menu()` when the menu should show **shortcut** indices only (q., p., 0–9, b.)—see "Shortcut-indexed vs numeric-indexed" below. questionary remains internal to ppui.
@@ -121,8 +121,7 @@ def main():
 
 **Example:**
 ```python
-from helpers.core import format_menu_choices
-from helpers.tui import prompt_toolkit_menu
+from helpers.core import format_menu_choices, prompt_toolkit_menu
 
 menu_items = [
     {"title": "Option 1", "value": "opt1"},

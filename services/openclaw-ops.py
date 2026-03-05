@@ -27,8 +27,8 @@ from helpers.core import (
     prompt_toolkit_menu,
     prompt_yes_no,
     run_command,
+    DataTable,
 )
-from helpers.tui import DataTable
 from rich.panel import Panel
 from rich.table import Table
 
