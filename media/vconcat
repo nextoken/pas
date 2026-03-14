@@ -47,6 +47,22 @@ def generate_default_output(inputs):
     basenames = [os.path.splitext(os.path.basename(f))[0] for f in inputs]
     return "+".join(basenames) + ".mp4"
 
+def get_stream_info(input_file):
+    """Check if the input file has video and audio streams."""
+    cmd = [
+        "ffprobe", "-v", "error", "-show_streams",
+        "-select_streams", "v", "-of", "csv=p=0", input_file
+    ]
+    has_video = bool(subprocess.run(cmd, capture_output=True, text=True).stdout.strip())
+    
+    cmd = [
+        "ffprobe", "-v", "error", "-show_streams",
+        "-select_streams", "a", "-of", "csv=p=0", input_file
+    ]
+    has_audio = bool(subprocess.run(cmd, capture_output=True, text=True).stdout.strip())
+    
+    return has_video, has_audio
+
 def build_ffmpeg_command(inputs, output, mute=False):
     """Build the FFmpeg command for concatenation as a list."""
     if len(inputs) < 2:
@@ -54,15 +70,32 @@ def build_ffmpeg_command(inputs, output, mute=False):
         sys.exit(1)
 
     # Build input args and filter complex
-    cmd = ["ffmpeg"]
+    cmd = ["ffmpeg", "-y"] # Always overwrite to avoid interactive prompt
+    filter_complex_parts = []
+    
+    actual_mute = mute
+    if not mute:
+        # Check if ALL inputs have audio. If any don't, we must mute or add dummy audio.
+        # For simplicity in this tool, we'll check if we can actually include audio.
+        for inp in inputs:
+            _, has_audio = get_stream_info(inp)
+            if not has_audio:
+                print(f"Warning: '{inp}' has no audio stream. Forcing mute for concatenation.", file=sys.stderr)
+                actual_mute = True
+                break
+
     for i, input_file in enumerate(inputs):
         cmd.extend(["-i", input_file])
-    filter_parts = [f"[{i}:v]" + ("" if mute else f"[{i}:a]") for i in range(len(inputs))]
-    if mute:
-        filter_complex = "".join([f"[{i}:v]" for i in range(len(inputs))]) + f"concat=n={len(inputs)}:v=1:a=0[v]"
+        if actual_mute:
+            filter_complex_parts.append(f"[{i}:v]")
+        else:
+            filter_complex_parts.append(f"[{i}:v][{i}:a]")
+
+    if actual_mute:
+        filter_complex = "".join(filter_complex_parts) + f"concat=n={len(inputs)}:v=1:a=0[v]"
         cmd.extend(["-filter_complex", filter_complex, "-map", "[v]", output])
     else:
-        filter_complex = "".join([f"[{i}:v][{i}:a]" for i in range(len(inputs))]) + f"concat=n={len(inputs)}:v=1:a=1[v][a]"
+        filter_complex = "".join(filter_complex_parts) + f"concat=n={len(inputs)}:v=1:a=1[v][a]"
         cmd.extend(["-filter_complex", filter_complex, "-map", "[v]", "-map", "[a]", output])
 
     return cmd
@@ -88,10 +121,15 @@ def main():
     display_cmd = " ".join(f'"{arg}"' if " " in arg else arg for arg in cmd)
     print(f"Running: {display_cmd}")
     try:
-        subprocess.run(cmd, check=True)
+        # Use subprocess.run with check=True to catch errors
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"Error: FFmpeg failed with exit code {result.returncode}.", file=sys.stderr)
+            print(f"FFmpeg Output:\n{result.stderr}", file=sys.stderr)
+            sys.exit(result.returncode)
         print(f"Successfully created {output}")
-    except subprocess.CalledProcessError as e:
-        print(f"Error: FFmpeg failed with exit code {e.returncode}.", file=sys.stderr)
+    except Exception as e:
+        print(f"Error: {str(e)}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

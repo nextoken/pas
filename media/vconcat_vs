@@ -12,6 +12,28 @@ Note: This script operates on all .mp4 files in the current directory.
 
 import os
 import subprocess
+import sys
+from helpers.core import console, Panel
+
+def show_help():
+    help_text = """
+Batch concatenate all MP4 files in the current directory, trimming the first and last frames.
+
+This tool is specialized for joining clips that may have artifacts at the very beginning 
+or end (common in some video editors). It re-encodes each clip to ensure clean 
+joins at frame boundaries.
+
+[bold]Usage:[/bold]
+  python vconcat_vs        # Run the concatenation process
+  python vconcat_vs -h     # Show this help message
+
+[bold]Note:[/bold]
+  This script operates on all .mp4 files in the current directory.
+  It creates a 'trimmed' subdirectory for intermediate files.
+  The final output is saved as 'output.mp4'.
+"""
+    console.print(Panel(help_text.strip(), title="PAS vconcat_vs Help", expand=False))
+    sys.exit(0)
 
 def create_filelist(directory):
     trimmed_dir = os.path.join(directory, 'trimmed')
@@ -68,6 +90,16 @@ def cleanup_temp_files(directory):
     os.remove('filelist.txt')
 
 if __name__ == "__main__":
+    # Show summary panel on start
+    console.print(Panel(
+        "Batch concatenate all MP4 files in the current directory, trimming the first and last frames.",
+        title="PAS vconcat_vs",
+        expand=False
+    ))
+
+    if len(sys.argv) > 1 and sys.argv[1] in ("-h", "--help"):
+        show_help()
+
     directory = '.'  # Change this to your target directory if needed
     create_filelist(directory)
     concatenate_videos()
