@@ -241,10 +241,14 @@ def run_sync(source: str, target: str, profile_name: Optional[str] = None):
     if not validate_rsync_paths(source, target):
         return
 
+    last_dry_run_cmd: Optional[List[str]] = None
+    last_sync_cmd: Optional[List[str]] = None
+
     while True:
         # Dry Run first
         console.print(f"\n[bold cyan]Dry Run Phase:[/bold cyan]")
         dry_run_cmd = get_rsync_command(source, target, dry_run=True)
+        last_dry_run_cmd = dry_run_cmd
         console.print(f"Command: [dim]{' '.join(dry_run_cmd)}[/dim]\n")
 
         subprocess.run(dry_run_cmd)
@@ -254,8 +258,21 @@ def run_sync(source: str, target: str, profile_name: Optional[str] = None):
             
         console.print(f"\n[bold green]Executing Sync:[/bold green]")
         sync_cmd = get_rsync_command(source, target, dry_run=False)
+        last_sync_cmd = sync_cmd
         subprocess.run(sync_cmd)
         break
+
+    # After loop completes, print a compact summary of the last commands used.
+    console.print("\n[bold]Rsync command summary (last run):[/bold]")
+    if last_dry_run_cmd:
+        console.print(f"  Dry run: [dim]{' '.join(last_dry_run_cmd)}[/dim]")
+    else:
+        console.print("  Dry run: [dim]<not run>[/dim]")
+
+    if last_sync_cmd:
+        console.print(f"  Actual : [dim]{' '.join(last_sync_cmd)}[/dim]")
+    else:
+        console.print("  Actual : [dim]<not run>[/dim]")
 
 def manage_profiles():
     """Main menu for managing profiles."""
