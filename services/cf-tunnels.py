@@ -204,7 +204,9 @@ def interactive_tunnel_menu(cloudflared_bin: Path, tunnels: List[Dict[str, Any]]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.replace("@pas-executable", "").strip(), formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--profile", help="Cloudflare profile to use (from ~/.pas/cf.json)")
     parser.parse_args()
+    args = parser.parse_args()
 
     info_text = """
 [bold]Cloudflare Tunnel Health Check[/bold]
@@ -219,7 +221,7 @@ This script monitors your tunnels:
     console.print(Panel(info_text.strip(), title="cf-tunnels", border_style="blue"))
     console.print("\n")
 
-    config = load_pas_config("cf")
+    config = load_pas_config("cf", profile=args.profile)
     
     cloudflared_bin = detect_cloudflared_binary()
     if not cloudflared_bin:
@@ -233,7 +235,7 @@ This script monitors your tunnels:
         if new_token:
             token = new_token
             config["CLOUDFLARE_API_TOKEN"] = token
-            save_pas_config("cf", config)
+            save_pas_config("cf", config, profile=args.profile)
 
     if not token:
         print("\n" + "!" * 60)
@@ -246,7 +248,7 @@ This script monitors your tunnels:
         token = input("Enter Cloudflare API Token (press Enter to skip): ").strip()
         if token:
             config["CLOUDFLARE_API_TOKEN"] = token
-            save_pas_config("cf", config)
+            save_pas_config("cf", config, profile=args.profile)
     
     all_dns_records = []
     account_id = None
@@ -257,7 +259,7 @@ This script monitors your tunnels:
         # Cache account_id if found and not already set
         if account_id and not config.get("CLOUDFLARE_ACCOUNT_ID"):
             config["CLOUDFLARE_ACCOUNT_ID"] = account_id
-            save_pas_config("cf", config)
+            save_pas_config("cf", config, profile=args.profile)
             print(f"Discovered and cached Cloudflare Account ID: {account_id}")
 
     if cloudflared_bin:

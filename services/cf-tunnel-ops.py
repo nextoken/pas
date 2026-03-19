@@ -338,11 +338,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.replace("@pas-executable", "").strip(), formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--debug-token", action="store_true", help="Enable debug output for token name retrieval")
     parser.add_argument("--local-bootstrap", action="store_true", help="Bootstrap tunnel on local macOS machine (self-bootstrap mode)")
+    parser.add_argument("--profile", help="Cloudflare profile to use (from ~/.pas/cf.json)")
     args = parser.parse_args()
     
     # Handle local bootstrap mode
     if args.local_bootstrap:
-        config = load_pas_config("cf")
+        config = load_pas_config("cf", profile=args.profile)
         token = config.get("CLOUDFLARE_API_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
         account_id = config.get("CLOUDFLARE_ACCOUNT_ID") or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
         
@@ -373,7 +374,7 @@ Automates the manual steps of tunnel creation via API:
     console.print(Panel(info_text.strip(), title="cf-tunnel-ops", border_style="blue"))
     console.print("\n")
 
-    config = load_pas_config("cf")
+    config = load_pas_config("cf", profile=args.profile)
     
     account_id = config.get("CLOUDFLARE_ACCOUNT_ID") or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
     token = config.get("CLOUDFLARE_API_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
@@ -385,14 +386,14 @@ Automates the manual steps of tunnel creation via API:
         if new_id:
             account_id = new_id
             config["CLOUDFLARE_ACCOUNT_ID"] = account_id
-            save_pas_config("cf", config)
+            save_pas_config("cf", config, profile=args.profile)
     else:
         print("\nCloudflare Account ID not found.")
         print(f"Find it on your Dashboard sidebar or in the URL: {CF_DASHBOARD_URL}")
         account_id = input("Enter Cloudflare Account ID: ").strip()
         if account_id:
             config["CLOUDFLARE_ACCOUNT_ID"] = account_id
-            save_pas_config("cf", config)
+            save_pas_config("cf", config, profile=args.profile)
     
     if not account_id:
         print("Error: Account ID is required.")
@@ -473,7 +474,7 @@ Automates the manual steps of tunnel creation via API:
         if new_token:
             token = new_token
             config["CLOUDFLARE_API_TOKEN"] = token
-            save_pas_config("cf", config)
+            save_pas_config("cf", config, profile=args.profile)
             # Re-verify permissions for the new token
             if token:
                 console.print("\n[bold blue]Verifying new API Token permissions...[/bold blue]")
@@ -502,7 +503,7 @@ Automates the manual steps of tunnel creation via API:
         token = input("Enter Cloudflare API Token: ").strip()
         if token:
             config["CLOUDFLARE_API_TOKEN"] = token
-            save_pas_config("cf", config)
+            save_pas_config("cf", config, profile=args.profile)
             # Verify permissions for the new token
             if account_id:
                 console.print("\n[bold blue]Verifying API Token permissions...[/bold blue]")
@@ -620,7 +621,7 @@ Automates the manual steps of tunnel creation via API:
                     # Clean up cached SSH host
                     if "tunnel_ssh_hosts" in config and tunnel_id in config["tunnel_ssh_hosts"]:
                         del config["tunnel_ssh_hosts"][tunnel_id]
-                        save_pas_config("cf", config)
+                        save_pas_config("cf", config, profile=args.profile)
                     # Also suggest cleaning up DNS if it was the last use of the tunnel
                     print("Note: You may still have DNS records pointing to this tunnel ID.")
                 else:
@@ -680,7 +681,7 @@ Automates the manual steps of tunnel creation via API:
                     # Clean up cached SSH host for the old ID
                     if "tunnel_ssh_hosts" in config and tunnel_id in config["tunnel_ssh_hosts"]:
                         del config["tunnel_ssh_hosts"][tunnel_id]
-                        save_pas_config("cf", config)
+                        save_pas_config("cf", config, profile=args.profile)
                     print("Tunnel deleted. Creating new one...")
                     tunnel_id = None # Reset so it creates a new one
                 else:
@@ -720,7 +721,7 @@ Automates the manual steps of tunnel creation via API:
         # Save TUNNEL_TOKEN to cf.json
         if token_val:
             config["TUNNEL_TOKEN"] = token_val
-            save_pas_config("cf", config)
+            save_pas_config("cf", config, profile=args.profile)
             print(f"Tunnel token saved to ~/.pas/cf.json as TUNNEL_TOKEN")
 
         # Installation logic based on mode
@@ -754,7 +755,7 @@ Automates the manual steps of tunnel creation via API:
                     if "tunnel_ssh_hosts" not in config:
                         config["tunnel_ssh_hosts"] = {}
                     config["tunnel_ssh_hosts"][tunnel_id] = ssh_host
-                    save_pas_config("cf", config)
+                    save_pas_config("cf", config, profile=args.profile)
                     print(f"Remote SSH host '{ssh_host}' cached for tunnel '{name}'")
 
         # DNS Setup

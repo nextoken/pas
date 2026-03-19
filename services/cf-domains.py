@@ -210,6 +210,7 @@ def interactive_dns_menu(token: str, zones: Optional[List[Dict[str, Any]]] = Non
 def main():
     parser = argparse.ArgumentParser(description=__doc__.replace("@pas-executable", "").strip(), formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("domains", nargs="*", help="Optional list of domain names to drill down into directly")
+    parser.add_argument("--profile", help="Cloudflare profile to use (from ~/.pas/cf.json)")
     args = parser.parse_args()
 
     info_text = """
@@ -224,7 +225,7 @@ This script allows you to:
     console.print(Panel(info_text.strip(), title="cf-domains", border_style="blue"))
     console.print("\n")
 
-    config = load_pas_config("cf")
+    config = load_pas_config("cf", profile=args.profile)
     token = config.get("CLOUDFLARE_API_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
     
     # Simple check for token validity if present
@@ -245,7 +246,7 @@ This script allows you to:
         token = input("Enter Cloudflare API Token (press Enter to skip): ").strip()
         if token:
             config["CLOUDFLARE_API_TOKEN"] = token
-            save_pas_config("cf", config)
+            save_pas_config("cf", config, profile=args.profile)
 
     if not token:
         print("\nNo valid token provided. Cannot check domains.")
@@ -257,7 +258,7 @@ This script allows you to:
         account_id = all_zones[0].get("account", {}).get("id")
         if account_id:
             config["CLOUDFLARE_ACCOUNT_ID"] = account_id
-            save_pas_config("cf", config)
+            save_pas_config("cf", config, profile=args.profile)
             print(f"Discovered and cached Cloudflare Account ID: {account_id}")
 
     default_domain = config.get("DEFAULT_DOMAIN")

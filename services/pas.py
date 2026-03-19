@@ -66,6 +66,69 @@ def get_pas_version() -> str:
         return version_path.read_text().strip()
     return "unknown"
 
+def migrate_legacy_llm_config():
+    """Migrate legacy LLM config (~/.pas/llms.json) to new format (~/.pas/ai-models.json + ~/.pas/pas.json)."""
+    legacy_path = Path.home() / ".pas" / "llms.json"
+    if not legacy_path.exists():
+        return
+
+    console.print("[yellow]Legacy LLM configuration found. Migrating to new format...[/yellow]")
+    
+    try:
+        # 1. Load legacy config
+        legacy_config = load_pas_config("llms")
+        if not legacy_config:
+            return
+
+        # 2. Prepare new shared config (ai-models.json)
+        ai_models_config = load_pas_config("ai-models")
+        if "profiles" not in ai_models_config:
+            ai_models_config["profiles"] = {}
+        if "configs" not in ai_models_config:
+            ai_models_config["configs"] = {}
+
+        legacy_providers = legacy_config.get("providers", {})
+        legacy_configs = legacy_config.get("configs", {})
+        legacy_active_id = legacy_config.get("active_config_id")
+
+        # Migrate providers to profiles
+        for p_id, p_data in legacy_providers.items():
+            if isinstance(p_data, dict) and p_id not in ai_models_config["profiles"]:
+                token = p_data.get("token")
+                if token:
+                    ai_models_config["profiles"][p_id] = {
+                        "provider": p_id,
+                        "token": token
+                    }
+
+        # Migrate configs
+        for c_id, c_data in legacy_configs.items():
+            if isinstance(c_data, dict) and c_id not in ai_models_config["configs"]:
+                provider = c_data.get("provider")
+                model = c_data.get("model")
+                if provider and model:
+                    ai_models_config["configs"][c_id] = {
+                        "profile": provider,
+                        "model": model
+                    }
+
+        save_pas_config("ai-models", ai_models_config)
+
+        # 3. Migrate active choice to pas.json
+        if legacy_active_id:
+            pas_config = load_pas_config("pas")
+            if not pas_config.get("active_ai_config_id"):
+                pas_config["active_ai_config_id"] = legacy_active_id
+                save_pas_config("pas", pas_config)
+
+        # 4. Backup legacy file
+        bak_path = legacy_path.with_suffix(".json.bak")
+        os.rename(legacy_path, bak_path)
+        console.print(f"[green]Migration complete! Legacy config backed up to {bak_path}[/green]")
+        
+    except Exception as e:
+        console.print(f"[red]Error during migration: {e}[/red]")
+
 def cmd_upgrade(args):
     """Update PAS from the remote repository and refresh setup."""
     root = get_pas_root()
@@ -80,6 +143,9 @@ def cmd_upgrade(args):
     if not run_command(["make", "setup"], cwd=root):
         sys.exit(1)
         
+    # 3. Run migrations
+    migrate_legacy_llm_config()
+
     new_version = get_pas_version()
     console.print(f"\n[bold green]PAS upgrade complete![/bold green]")
     if old_version != new_version:
@@ -95,95 +161,45 @@ def cmd_repo(args):
     console.print("Opening in default browser...\n")
     webbrowser.open(url)
 
-def migrate_llm_config(config):
-    """Migrate legacy LLM config to the new format."""
-    if config is None:
-        config = {}
-    
-    # If it's already in the new format, return as is
-    if "active_config_id" in config and "configs" in config and "providers" in config:
-        return config, False
-
-    new_config = {
-        "active_config_id": config.get("active_config_id"),
-        "configs": config.get("configs", {}),
-        "providers": config.get("providers", {})
-    }
-    
-    # Check if we have legacy provider data to migrate
-    legacy_providers = config.get("providers", {})
-    active_provider = config.get("active_provider")
-    
-    # If it's truly empty, don't say we migrated anything
-    if not legacy_providers and not active_provider and not new_config["configs"]:
-        return new_config, False
-
-    # ... (rest of migration logic)
-
-    # Move tokens to top-level providers map and create config entries
-    for p_id, p_data in legacy_providers.items():
-        if not isinstance(p_data, dict):
-            continue
-            
-        token = p_data.get("token")
-        model = p_data.get("model")
-        
-        new_config["providers"][p_id] = {"token": token}
-        
-        if model:
-            config_id = f"{p_id}:{model}"
-            new_config["configs"][config_id] = {
-                "provider": p_id,
-                "model": model
-            }
-            if p_id == active_provider:
-                new_config["active_config_id"] = config_id
-
-    # Fallback if no active config could be determined
-    if not new_config["active_config_id"] and new_config["configs"]:
-        new_config["active_config_id"] = list(new_config["configs"].keys())[0]
-    
-    # If it was empty or couldn't be migrated, keep it as is but with new structure
-    if not new_config["active_config_id"] and active_provider:
-        # We have a provider but no model was set yet or migration failed
-        pass
-
-    return new_config, True
-
 def cmd_ask(args):
-    """Ask an LLM about available tools."""
-    config = load_pas_config("llms")
-    if config is None:
-        config = {}
+    """Ask an AI assistant about available tools."""
+    ai_models_config = load_pas_config("ai-models")
+    pas_config = load_pas_config("pas")
     
-    # Migrate if necessary
-    config, migrated = migrate_llm_config(config)
-    if migrated:
-        save_pas_config("llms", config)
+    active_config_id = pas_config.get("active_ai_config_id")
     
-    if not config or not config.get("active_config_id"):
-        setup_llm(config)
-        config = load_pas_config("llms") or {} # Reload after setup
+    if not active_config_id:
+        # Fallback to system default if any, or trigger setup
+        active_config_id = ai_models_config.get("active_config_id")
+        if not active_config_id:
+            setup_llm(ai_models_config)
+            pas_config = load_pas_config("pas")
+            active_config_id = pas_config.get("active_ai_config_id")
     
-    active_config_id = config.get("active_config_id")
-    active_config = config.get("configs", {}).get(active_config_id)
+    active_config = ai_models_config.get("configs", {}).get(active_config_id)
     
     if not active_config:
-        setup_llm(config)
-        config = load_pas_config("llms") or {}
-        active_config_id = config.get("active_config_id")
-        active_config = config.get("configs", {}).get(active_config_id)
+        setup_llm(ai_models_config)
+        pas_config = load_pas_config("pas")
+        active_config_id = pas_config.get("active_ai_config_id")
+        active_config = ai_models_config.get("configs", {}).get(active_config_id)
 
     if not active_config:
-        console.print("[red]Error: Could not determine active LLM configuration.[/red]")
+        console.print("[red]Error: Could not determine active AI configuration.[/red]")
         return
 
-    provider = active_config.get("provider")
+    profile_id = active_config.get("profile")
     model = active_config.get("model")
-    provider_token = config.get("providers", {}).get(provider, {}).get("token")
     
-    # Prepare provider_config for existing call_llm / validate_llm_token
-    # We might want to refactor those too later
+    profile_data = ai_models_config.get("profiles", {}).get(profile_id, {})
+    provider = profile_data.get("provider")
+    provider_token = profile_data.get("token")
+    
+    if not provider or not provider_token:
+        console.print(f"[red]Error: Profile '{profile_id}' is missing provider or token.[/red]")
+        setup_llm(ai_models_config)
+        return
+
     provider_config = {
         "token": provider_token,
         "model": model
@@ -193,14 +209,18 @@ def cmd_ask(args):
     is_valid, token_meta = validate_llm_token(provider, provider_token)
     if not provider_token or not is_valid:
         if provider_token:
-            console.print(f"[bold red]Error:[/bold red] {provider} API token is invalid or expired.")
-        setup_llm(config)
-        config = load_pas_config("llms") or {} # Reload after setup
-        active_config_id = config.get("active_config_id")
-        active_config = config.get("configs", {}).get(active_config_id)
-        provider = active_config.get("provider")
+            console.print(f"[bold red]Error:[/bold red] {provider} API token for profile '{profile_id}' is invalid or expired.")
+        setup_llm(ai_models_config)
+        # Reload everything after setup
+        ai_models_config = load_pas_config("ai-models")
+        pas_config = load_pas_config("pas")
+        active_config_id = pas_config.get("active_ai_config_id")
+        active_config = ai_models_config.get("configs", {}).get(active_config_id, {})
+        profile_id = active_config.get("profile")
         model = active_config.get("model")
-        provider_token = config.get("providers", {}).get(provider, {}).get("token")
+        profile_data = ai_models_config.get("profiles", {}).get(profile_id, {})
+        provider = profile_data.get("provider")
+        provider_token = profile_data.get("token")
         provider_config = {"token": provider_token, "model": model}
         is_valid, token_meta = validate_llm_token(provider, provider_token)
 
@@ -210,20 +230,23 @@ def cmd_ask(args):
     while True:
         query = initial_query
         if is_interactive:
-            # ... (rest of interactive logic)
             # Refresh config in case it was changed in the loop
-            config = load_pas_config("llms")
-            active_config_id = config.get("active_config_id", "Not configured")
-            active_config = config.get("configs", {}).get(active_config_id, {})
-            provider = active_config.get("provider", "N/A")
+            ai_models_config = load_pas_config("ai-models")
+            pas_config = load_pas_config("pas")
+            active_config_id = pas_config.get("active_ai_config_id", "Not configured")
+            active_config = ai_models_config.get("configs", {}).get(active_config_id, {})
+            profile_id = active_config.get("profile", "N/A")
             model = active_config.get("model", "N/A")
-            provider_token = config.get("providers", {}).get(provider, {}).get("token")
+            
+            profile_data = ai_models_config.get("profiles", {}).get(profile_id, {})
+            provider = profile_data.get("provider", "N/A")
+            provider_token = profile_data.get("token")
             provider_config = {"token": provider_token, "model": model}
             
             # Interactive mode
             menu_choices = [
                 {"title": "Ask a question", "value": "ASK"},
-                {"title": f"Switch/Setup LLM Config (Current: {active_config_id})", "value": "SETUP"},
+                {"title": f"Switch/Setup AI Config (Current: {active_config_id})", "value": "SETUP"},
                 {"title": "[Quit]", "value": "QUIT"}
             ]
             formatted_choices = format_menu_choices(menu_choices, title_field="title", value_field="value")
@@ -232,7 +255,7 @@ def cmd_ask(args):
             if action == "QUIT" or not action:
                 return
             elif action == "SETUP":
-                setup_llm(config)
+                setup_llm(ai_models_config)
                 continue
             
             query = questionary.text("Enter your question:").ask()
@@ -248,14 +271,12 @@ def cmd_ask(args):
         
         # Get token age for display
         from helpers.core import get_secret_age, SECRET_ROTATION_DAYS
-        token_age = get_secret_age("llms", f"providers.{provider}.token")
+        token_age = get_secret_age("ai-models", f"profiles.{profile_id}.token")
         
         # Try to get actual expiration from OpenRouter metadata
         actual_expiry_days = None
         if token_meta and "expires_at" in token_meta and token_meta["expires_at"]:
             try:
-                # OpenRouter returns ISO 8601, e.g., "2026-03-16T14:59:18.822Z"
-                # We strip the 'Z' and parse
                 expiry_str = token_meta["expires_at"].replace("Z", "+00:00")
                 expiry_date = datetime.datetime.fromisoformat(expiry_str)
                 now = datetime.datetime.now(datetime.timezone.utc)
@@ -320,7 +341,7 @@ Below is a list of available tools and their detailed descriptions (extracted fr
 5. Use the [Developer Guide] to explain how to create new tools, register them, or use helper functions.
 6. If no tool seems relevant, say so and suggest looking at the official repository."""
 
-        console.print(f"\n[bold blue]Asking LLM ({provider}:{model}){age_str}...[/bold blue]")
+        console.print(f"\n[bold blue]Asking AI ({profile_id}:{model}){age_str}...[/bold blue]")
         
         try:
             response = call_llm(provider, provider_config, system_prompt, query)
@@ -333,18 +354,21 @@ Below is a list of available tools and their detailed descriptions (extracted fr
             console.print(f"[bold red]Error:[/bold red] {error_msg}")
             if "403" in error_msg or "401" in error_msg:
                 if questionary.confirm("The API token seems invalid. Would you like to re-configure it?").ask():
-                    setup_llm(config)
+                    setup_llm(ai_models_config)
                     if not is_interactive:
                         # Re-run the call if not interactive
-                        config = load_pas_config("llms")
-                        active_config_id = config.get("active_config_id")
-                        active_config = config.get("configs", {}).get(active_config_id, {})
-                        provider = active_config.get("provider")
+                        ai_models_config = load_pas_config("ai-models")
+                        pas_config = load_pas_config("pas")
+                        active_config_id = pas_config.get("active_ai_config_id")
+                        active_config = ai_models_config.get("configs", {}).get(active_config_id, {})
+                        profile_id = active_config.get("profile")
                         model = active_config.get("model")
-                        provider_token = config.get("providers", {}).get(provider, {}).get("token")
+                        profile_data = ai_models_config.get("profiles", {}).get(profile_id, {})
+                        provider = profile_data.get("provider")
+                        provider_token = profile_data.get("token")
                         provider_config = {"token": provider_token, "model": model}
                         try:
-                            console.print(f"\n[bold blue]Retrying LLM ({provider}:{model})...[/bold blue]")
+                            console.print(f"\n[bold blue]Retrying AI ({profile_id}:{model})...[/bold blue]")
                             response = call_llm(provider, provider_config, system_prompt, query)
                             if not response or not response.strip():
                                 console.print(Panel("[yellow]The AI returned an empty response on retry. Please try again later or check your API status.[/yellow]", title="PAS AI Assistant", border_style="yellow"))
@@ -355,6 +379,106 @@ Below is a list of available tools and their detailed descriptions (extracted fr
 
         if not is_interactive:
             break
+
+def setup_llm(config):
+    """Setup AI configuration using ai-ops.py or internal logic."""
+    pas_config = load_pas_config("pas")
+    active_config_id = pas_config.get("active_ai_config_id")
+
+    # Menu for existing configs or new one
+    choices = []
+    for cfg_id in config.get("configs", {}).keys():
+        is_active = cfg_id == active_config_id
+        title = f"{cfg_id} {'(ACTIVE)' if is_active else ''}"
+        choices.append({"title": title, "value": cfg_id})
+    
+    choices.append({"title": "[Manage AI Profiles/Configs (ai-ops)]", "value": "AI_OPS"})
+    choices.append({"title": "[Add new configuration]", "value": "NEW"})
+    choices.append({"title": "[Back]", "value": "BACK"})
+    
+    formatted_choices = format_menu_choices(choices, title_field="title", value_field="value")
+    console.print("\n[bold cyan]AI Configuration Management:[/bold cyan]")
+    selected = prompt_toolkit_menu(formatted_choices)
+    
+    if not selected or selected == "BACK":
+        return
+
+    if selected == "AI_OPS":
+        # Call ai-ops.py
+        subprocess.run([sys.executable, str(get_pas_root() / "services" / "ai-ops.py"), "list"])
+        # After returning, reload config
+        new_config = load_pas_config("ai-models")
+        config.clear()
+        config.update(new_config)
+        return setup_llm(config)
+
+    if selected == "NEW":
+        # Select Profile
+        profiles = config.get("profiles", {})
+        if not profiles:
+            console.print("[yellow]No profiles found. Let's create one.[/yellow]")
+            provider = "openrouter"
+            profile_id = questionary.text("Enter Profile ID (e.g., 'default'):").ask()
+            if not profile_id: return
+            token = questionary.password(f"Enter {provider} API Token:").ask()
+            if not token: return
+            config["profiles"][profile_id] = {"provider": provider, "token": token}
+            save_pas_config("ai-models", config)
+        else:
+            profile_choices = [{"title": pid, "value": pid} for pid in profiles]
+            profile_choices.append({"title": "[Create new profile]", "value": "NEW_PROFILE"})
+            selected_profile = prompt_toolkit_menu(format_menu_choices(profile_choices, title_field="title", value_field="value"))
+            if selected_profile == "NEW_PROFILE":
+                provider = "openrouter"
+                profile_id = questionary.text("Enter Profile ID:").ask()
+                if not profile_id: return
+                token = questionary.password(f"Enter {provider} API Token:").ask()
+                if not token: return
+                config["profiles"][profile_id] = {"provider": provider, "token": token}
+                save_pas_config("ai-models", config)
+            else:
+                profile_id = selected_profile
+
+        if not profile_id: return
+        provider = config["profiles"][profile_id]["provider"]
+
+        # Select Model
+        model = "openai/gpt-4o-mini"
+        if provider == "openrouter":
+            console.print("[cyan]Fetching available models from OpenRouter...[/cyan]")
+            source_models = get_openrouter_models()
+            if not source_models:
+                source_models = [{"id": "openai/gpt-4o-mini"}, {"id": "anthropic/claude-3.5-sonnet"}]
+            
+            menu = Menu("Select Model")
+            for m_obj in source_models[:15]:
+                m_id = m_obj.get("id")
+                menu.add_option(m_id, m_id)
+            
+            menu.add_option("Other...", "__other__")
+            model_choice = menu.run(loop=False)
+            if model_choice == "__other__":
+                model = questionary.text("Enter model ID:").ask()
+            else:
+                model = model_choice
+
+        if not model: return
+
+        # Save configuration
+        config_id = f"{profile_id}:{model}"
+        config["configs"][config_id] = {"profile": profile_id, "model": model}
+        save_pas_config("ai-models", config)
+        
+        # Save app-specific choice
+        pas_config["active_ai_config_id"] = config_id
+        save_pas_config("pas", pas_config)
+        console.print(f"[green]Configuration '{config_id}' saved and set as active for 'pas'.[/green]")
+    else:
+        # Switch to existing
+        pas_config["active_ai_config_id"] = selected
+        save_pas_config("pas", pas_config)
+        console.print(f"[green]Switched to configuration '{selected}' for 'pas'.[/green]")
+
 
 def get_openrouter_models():
     """Fetch and filter popular models from OpenRouter API."""
@@ -367,192 +491,22 @@ def get_openrouter_models():
         with urllib.request.urlopen(req) as res:
             data = json.loads(res.read().decode("utf-8"))
             if "data" in data:
-                # OpenRouter doesn't have a direct "popularity" field in the models API,
-                # but we can prioritize common providers and non-free models that are generally popular.
-                # For now, we'll fetch them all and select a subset of well-known ones, 
-                # or just use the first 15 if they seem relevant.
                 all_models = data["data"]
-                
-                # Sort by a heuristic: prefer non-free, prefer specific providers
                 def model_priority(m):
                     pid = m.get("id", "")
-                    # Prioritize these providers
                     p_score = 0
                     for p in ["openai/", "anthropic/", "google/", "deepseek/", "meta-llama/"]:
                         if pid.startswith(p):
                             p_score = 10
                             break
-                    
-                    # Penalize free/exp models slightly so they don't dominate the top
                     if ":free" in pid or "-exp" in pid:
                         p_score -= 5
-                        
                     return p_score
-
                 sorted_models = sorted(all_models, key=model_priority, reverse=True)
                 return sorted_models
     except Exception as e:
         console.print(f"[yellow]Warning: Could not fetch models from OpenRouter: {e}[/yellow]")
     return []
-
-def setup_llm(config):
-    if "providers" not in config:
-        config["providers"] = {}
-    if "configs" not in config:
-        config["configs"] = {}
-
-    # Menu for existing configs or new one
-    choices = []
-    for cfg_id in config.get("configs", {}).keys():
-        is_active = cfg_id == config.get("active_config_id")
-        title = f"{cfg_id} {'(ACTIVE)' if is_active else ''}"
-        choices.append({"title": title, "value": cfg_id})
-    
-    choices.append({"title": "[Add new configuration]", "value": "NEW"})
-    choices.append({"title": "[Back]", "value": "BACK"})
-    
-    formatted_choices = format_menu_choices(choices, title_field="title", value_field="value")
-    console.print("\n[bold cyan]LLM Configuration Management:[/bold cyan]")
-    selected = prompt_toolkit_menu(formatted_choices)
-    
-    if not selected or selected == "BACK":
-        return
-
-    if selected == "NEW":
-        # Select Provider
-        providers_list = [{"name": "openrouter", "id": "openrouter"}]
-        provider_choices = format_menu_choices(providers_list, title_field="name", value_field="id")
-        console.print("\n[bold cyan]Select LLM Provider:[/bold cyan]")
-        provider = prompt_toolkit_menu(provider_choices)
-        if not provider: return
-
-        # Handle Token
-        current_token = config.get("providers", {}).get(provider, {}).get("token")
-        token = None
-        
-        if current_token:
-            masked_token = current_token[:8] + "*" * (len(current_token) - 12) + current_token[-4:] if len(current_token) > 12 else "****"
-            if questionary.confirm(f"Reuse existing token for {provider} ({masked_token})?").ask():
-                token = current_token
-        
-        if not token:
-            if provider == "openrouter":
-                console.print(f"You can create an API key at: [bold cyan]https://openrouter.ai/settings/keys[/bold cyan]")
-            token = questionary.password(f"Enter {provider} API Token:").ask()
-            if not token:
-                console.print("[yellow]Token cannot be empty.[/yellow]")
-                return
-
-        # Select Model
-        model = "openai/gpt-4o-mini"
-        if provider == "openrouter":
-            console.print("[cyan]Fetching available models from OpenRouter...[/cyan]")
-            dynamic_models = get_openrouter_models()
-            
-            # Get already configured models to show them first
-            existing_models = []
-            for cfg in config.get("configs", {}).values():
-                if cfg.get("provider") == provider and cfg.get("model"):
-                    if cfg["model"] not in existing_models:
-                        existing_models.append(cfg["model"])
-
-            # Use dynamic models if available, otherwise fallback
-            all_available_models = get_openrouter_models()
-            source_models = all_available_models if all_available_models else [
-                {"id": "openai/gpt-4o-mini"},
-                {"id": "anthropic/claude-3.5-sonnet"},
-                {"id": "google/gemini-2.0-flash-001"},
-                {"id": "deepseek/deepseek-chat"},
-            ]
-            
-            # Use ppui Menu for model selection
-            menu = Menu("Select Model")
-            
-            def format_model_title(m_obj):
-                mid = m_obj.get("id")
-                pricing = m_obj.get("pricing", {})
-                if not pricing:
-                    # Try to find the object in source_models if it exists to get pricing
-                    # This handles the case where m_obj was a fallback {"id": m_id}
-                    m_obj = next((obj for obj in source_models if obj.get("id") == mid), m_obj)
-                    pricing = m_obj.get("pricing", {})
-
-                if pricing:
-                    prompt = float(pricing.get("prompt", 0)) * 1000000
-                    completion = float(pricing.get("completion", 0)) * 1000000
-                    # Format as $0.00 or $0.0000 depending on value
-                    p_str = f"${prompt:g}" if prompt >= 0.01 else f"${prompt:.4f}"
-                    c_str = f"${completion:g}" if completion >= 0.01 else f"${completion:.4f}"
-                    return f"{mid:<40} | Cost/1M: {p_str} in, {c_str} out"
-                return f"{mid:<40}"
-
-            # Add existing models first
-            for m_id in existing_models:
-                # Find the object in source_models if it exists to get pricing
-                m_obj = next((obj for obj in source_models if obj.get("id") == m_id), {"id": m_id})
-                menu.add_option(format_model_title(m_obj), m_id)
-            
-            # Add top dynamic models
-            display_limit = 15
-            displayed_count = 0
-            for m_obj in source_models:
-                m_id = m_obj.get("id")
-                if m_id not in existing_models:
-                    menu.add_option(format_model_title(m_obj), m_id)
-                    displayed_count += 1
-                    if displayed_count >= display_limit:
-                        break
-            
-            OTHER_VALUE = "__other__"
-            menu.add_option("Other (see https://openrouter.ai/models for IDs)", OTHER_VALUE)
-            menu.add_back_item()
-            menu.add_quit_item()
-                
-            model_choice = menu.run(loop=False)
-            
-            if not model_choice or model_choice == "quit":
-                sys.exit(0)
-            elif model_choice == "back":
-                return setup_llm(config) # Recursive call to go back
-            elif model_choice == OTHER_VALUE:
-                model = questionary.text("Enter model ID:", default="openai/gpt-4o-mini").ask() or "openai/gpt-4o-mini"
-            else:
-                model = model_choice
-
-        # Save configuration
-        config_id = f"{provider}:{model}"
-        config["providers"][provider] = {"token": token}
-        config["configs"][config_id] = {"provider": provider, "model": model}
-        config["active_config_id"] = config_id
-        
-        save_pas_config("llms", config)
-        
-        if validate_llm_token(provider, token)[0]:
-            console.print(f"[green]Configuration '{config_id}' saved and verified.[/green]")
-        else:
-            console.print(f"[bold yellow]Warning:[/bold yellow] Saved, but verification failed for {provider}. Check your token.")
-    else:
-        # Switch to existing
-        config["active_config_id"] = selected
-        
-        # Check if we should re-configure the token for this provider
-        active_config = config.get("configs", {}).get(selected, {})
-        provider = active_config.get("provider")
-        current_token = config.get("providers", {}).get(provider, {}).get("token")
-        
-        if current_token:
-            masked_token = current_token[:8] + "*" * (len(current_token) - 12) + current_token[-4:] if len(current_token) > 12 else "****"
-            console.print(f"\nConfiguration '{selected}' uses provider '{provider}' with token: {masked_token}")
-            if questionary.confirm(f"Would you like to update the API token for '{provider}'?").ask():
-                if provider == "openrouter":
-                    console.print(f"You can create an API key at: [bold cyan]https://openrouter.ai/settings/keys[/bold cyan]")
-                new_token = questionary.password(f"Enter new {provider} API Token:").ask()
-                if new_token:
-                    config["providers"][provider]["token"] = new_token
-                    console.print(f"[green]Token updated for {provider}.[/green]")
-        
-        save_pas_config("llms", config)
-        console.print(f"[green]Switched to configuration '{selected}'.[/green]")
 
 def validate_llm_token(provider, token):
     """Check if the provided token is valid for the given provider. Returns (is_valid, metadata)."""
@@ -616,10 +570,9 @@ def call_llm(provider, provider_config, system_prompt, query):
         raise Exception(f"Unsupported provider: {provider}")
 
 def _parse_tool_constants(content: str) -> tuple[str | None, str | None]:
-    """Extract TOOL_ID and TOOL_SHORT_DESC from file content (single-line string values). Returns (tool_id, short_desc)."""
+    """Extract TOOL_ID and TOOL_SHORT_DESC from file content."""
     tool_id = None
     short_desc = None
-    # TOOL_ID = "user-ops" or TOOL_ID = 'user-ops'
     m = re.search(r'TOOL_ID\s*=\s*["\']([^"\']+)["\']', content)
     if m:
         tool_id = m.group(1).strip()
@@ -638,7 +591,6 @@ def get_tools_info() -> list[tuple[str, str]]:
         dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'bin']
         for file in files:
             file_path = Path(path) / file
-            # Only check files that are likely scripts
             if file_path.suffix not in ['.py', '', '.sh', '.bb'] or file_path.name.startswith("legacy-"):
                 continue
             
@@ -646,13 +598,10 @@ def get_tools_info() -> list[tuple[str, str]]:
                 with open(file_path, 'r', errors='ignore') as f:
                     content = f.read(8192)
                     lines = content.splitlines()[:80]
-                    
-                    # Prefer TOOL_ID and TOOL_SHORT_DESC when defined in the script
                     tool_id, short_desc = _parse_tool_constants(content)
                     name = tool_id if tool_id else file_path.stem
                     desc = short_desc
 
-                    # Fall back to docstring/comment description if no TOOL_SHORT_DESC
                     if not desc:
                         found_marker_at = -1
                         for i, line in enumerate(lines):
@@ -693,7 +642,6 @@ def get_tools_info() -> list[tuple[str, str]]:
                                         else: break
                                 else:
                                     desc_lines.append(first_line)
-
                             desc = "\n  ".join([d for d in desc_lines if d]) if desc_lines else "No description available"
                     if not desc:
                         desc = "No description available"
@@ -706,15 +654,7 @@ def cmd_list(args):
     """List all available PAS tools and their descriptions."""
     tools = get_tools_info()
     num_tools = len(tools)
-    
-    # Determine padding based on total number of tools
-    if num_tools < 10:
-        padding = 1
-    elif num_tools < 100:
-        padding = 2
-    else:
-        padding = 3
-
+    padding = 1 if num_tools < 10 else (2 if num_tools < 100 else 3)
     print(f"\n{'No.':<{padding + 2}} {'Tool':<20} Description")
     print("-" * (padding + 2 + 20 + 40))
     for i, (name, desc) in enumerate(tools, 1):
@@ -742,30 +682,16 @@ The central command-line utility for managing this toolkit:
 - [cyan]up[/cyan]: Alias for [cyan]upgrade[/cyan].
 - [cyan]repo[/cyan]: Opens the official GitHub repository in your browser.
 """
-    # Only print if no arguments
     if len(sys.argv) == 1:
         console.print(Panel(info_text.strip(), title="pas", border_style="blue"))
         console.print("\n")
 
-    # Upgrade command
-    upgrade_parser = subparsers.add_parser("upgrade", help="Pull latest changes and run setup")
-    upgrade_parser.set_defaults(func=cmd_upgrade)
-
-    # "up" alias for upgrade
-    up_parser = subparsers.add_parser("up", help="Alias for 'upgrade'")
-    up_parser.set_defaults(func=cmd_upgrade)
-
-    # List command
-    list_parser = subparsers.add_parser("list", help="List all available PAS tools")
-    list_parser.set_defaults(func=cmd_list)
-
-    # Repo command
-    repo_parser = subparsers.add_parser("repo", help="Open official GitHub repository")
-    repo_parser.set_defaults(func=cmd_repo)
-
-    # Ask command — everything after "ask" is the question (no quotes needed)
-    ask_parser = subparsers.add_parser("ask", help="Ask an LLM about PAS tools")
-    ask_parser.add_argument("query", nargs="*", help="The question to ask (all words form one sentence)")
+    subparsers.add_parser("upgrade", help="Pull latest changes and run setup").set_defaults(func=cmd_upgrade)
+    subparsers.add_parser("up", help="Alias for 'upgrade'").set_defaults(func=cmd_upgrade)
+    subparsers.add_parser("list", help="List all available PAS tools").set_defaults(func=cmd_list)
+    subparsers.add_parser("repo", help="Open official GitHub repository").set_defaults(func=cmd_repo)
+    ask_parser = subparsers.add_parser("ask", help="Ask an AI assistant about PAS tools")
+    ask_parser.add_argument("query", nargs="*", help="The question to ask")
     ask_parser.set_defaults(func=cmd_ask)
 
     args = parser.parse_args()
@@ -777,4 +703,3 @@ The central command-line utility for managing this toolkit:
 
 if __name__ == "__main__":
     main()
-

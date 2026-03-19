@@ -394,9 +394,10 @@ def get_pas_config_dir() -> Path:
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
 
-def load_pas_config(service: str, quiet: bool = False) -> Dict[str, Any]:
+def load_pas_config(service: str, quiet: bool = False, profile: Optional[str] = None) -> Dict[str, Any]:
     """
     Load JSON config for a specific service from ~/.pas/service.json.
+    If profile is provided, it looks for organization-based profiles in the config.
     Automatically handles secret retrieval from Keychain if SEC: tags are found.
     """
     config_file = get_pas_config_dir() / f"{service}.json"
@@ -409,8 +410,20 @@ def load_pas_config(service: str, quiet: bool = False) -> Dict[str, Any]:
                 save_pas_config(service, data)
                 # Re-read after migration to get the SEC: references
                 data = json.loads(config_file.read_text())
-                
-            return _de_secretize(data, service, quiet=quiet)
+            
+            config = _de_secretize(data, service, quiet=quiet)
+            
+            if profile:
+                profiles = config.get("profiles", {})
+                if profile in profiles:
+                    # Merge profile-specific settings into the main config
+                    # Profile settings take precedence
+                    profile_config = profiles[profile]
+                    return {**config, **profile_config, "current_profile": profile}
+                elif not quiet:
+                    print(f"Warning: Profile '{profile}' not found in {service} config.")
+            
+            return config
         except json.JSONDecodeError:
             if not quiet:
                 print(f"Warning: Could not parse config for {service}. Returning empty dict.")
@@ -445,12 +458,34 @@ def get_secret_age(service: str, key_path: str) -> Optional[int]:
         pass
     return None
 
-def save_pas_config(service: str, data: Dict[str, Any]):
+def save_pas_config(service: str, data: Dict[str, Any], profile: Optional[str] = None):
     """
     Save JSON config for a specific service to ~/.pas/service.json.
+    If profile is provided, updates that specific profile within the config.
     Automatically moves sensitive keys to Keychain and stores SEC: references.
     """
     config_file = get_pas_config_dir() / f"{service}.json"
+    
+    if profile:
+        # Load existing config to update only the specific profile
+        existing_config = {}
+        if config_file.exists():
+            try:
+                # We use a raw load here because we want to preserve SEC: references
+                # during the update process, and _en_secretize will handle new ones.
+                existing_config = json.loads(config_file.read_text())
+            except Exception:
+                pass
+        
+        if "profiles" not in existing_config:
+            existing_config["profiles"] = {}
+        
+        # Update the specific profile
+        existing_config["profiles"][profile] = data
+        # Also update 'current_profile' at the top level
+        existing_config["current_profile"] = profile
+        data = existing_config
+
     # Move secrets to Keychain and store references
     processed_data = _en_secretize(data, service)
     safe_write_json(config_file, processed_data, keep_backups=JSON_BACKUP_KEEP_DEFAULT, indent=2)
