@@ -9,6 +9,7 @@ AI AGENT GUIDELINES:
 - COMMANDS: Use `run_command` instead of raw `subprocess.run` for consistent error handling.
 - UI: This module re-exports TUI helpers from `.tui`. Use them for all interactivity.
 - PATHS: Always use `pathlib.Path` and handle `~` expansion for user inputs.
+  Use `normalize_path_input` when the user may paste shell-quoted paths.
 """
 
 import os
@@ -393,6 +394,21 @@ def get_pas_config_dir() -> Path:
     config_dir = Path.home() / ".pas"
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
+
+
+def normalize_path_input(raw: str) -> str:
+    """
+    Strip whitespace and one pair of matching outer single/double quotes.
+
+    Pasted paths often look like `"/path/to/file"`; without stripping, pathlib
+    treats the leading quote as a relative path segment. Use before
+    ``Path(...).expanduser().resolve()`` for interactive path inputs.
+    """
+    s = raw.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1].strip()
+    return s
+
 
 def load_pas_config(service: str, quiet: bool = False, profile: Optional[str] = None) -> Dict[str, Any]:
     """
