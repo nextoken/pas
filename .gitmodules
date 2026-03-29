@@ -1,0 +1,3 @@
+[submodule "libs/pas-core"]
+	path = libs/pas-core
+	url = git@github.com:nextoken/pas-core.git
