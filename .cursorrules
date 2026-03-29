@@ -4,18 +4,18 @@ You are an expert developer and AI assistant specializing in the PAS (Process Au
 
 ## Core Directives
 
-- **Always consult `CONTRIBUTING.md`**: This file contains the project's philosophy, standards, and mandatory practices. You must adhere to it for all code changes.
+- **Always consult `dev-guide.md`**: This file contains the project's philosophy, standards, and mandatory practices. You must adhere to it for all code changes.
 - **Always consult `helpers/core.py`**: Before implementing any system utility, configuration handler, or UI element (menus, prompts), check if a helper already exists. Do not reinvent common patterns.
 - **Maintain Auto-Registration**: Every new script must include the `#!/usr/bin/env python3` shebang (or appropriate for the language) and the `@pas-executable` marker in the first 5 lines.
 
 ## Implementation Standards
 
 - **Self-Documentation**: All tools must start with a Rich Panel summary explaining their capabilities and requirements.
-- **Standardized Menus (MANDATORY)**: **ALL** interactive menus MUST use `prompt_toolkit_menu` from `helpers/core.py`. Use `format_menu_choices` for numeric-indexed menus (01., 02., …); for **shortcut-indexed** menus (q., p., 0–9, b.) use `choice(title, value)` from `helpers.core` and pass to `prompt_toolkit_menu()` so the label shows e.g. "q. Quit" not "01. q. Quit". questionary is internal to ppui. **DO NOT** use plain `input()` or `print()` for menu selection. Every menu must have a `[Quit]` (q) option, and sub-menus must have a `[Back]` (b) option. See `CONTRIBUTING.md` section 5 for detailed requirements and examples.
+- **Standardized Menus (MANDATORY)**: **ALL** interactive menus MUST use `prompt_toolkit_menu` from `helpers/core.py`. Use `format_menu_choices` for numeric-indexed menus (01., 02., …); for **shortcut-indexed** menus (q., p., 0–9, b.) use `choice(title, value)` from `helpers.core` and pass to `prompt_toolkit_menu()` so the label shows e.g. "q. Quit" not "01. q. Quit". questionary is internal to ppui. **DO NOT** use plain `input()` or `print()` for menu selection. Every menu must have a `[Quit]` (q) option, and sub-menus must have a `[Back]` (b) option. See `dev-guide.md` section 5 for detailed requirements and examples.
 - **Security**: Never store raw secrets in JSON. Use the secretization logic in `helpers/core.py` which leverages the macOS Keychain (with fallback for other OS).
 - **Versioning**: Follow the Calendar Versioning (CalVer) policy (`YYYY.MM.DD`). Update the `VERSION` file when making significant toolkit-wide changes.
 - **URL Consolidation**: Consolidate all external service URLs and URL templates as constants at the top of the script for easier maintenance. Use clear, descriptive names (e.g., `CF_DASHBOARD_URL`, `CF_EDIT_URL_TEMPLATE`). Avoid inlining URL fragments.
-- **Configuration Consolidation (MANDATORY)**: **ALL** hardcoded configuration values (ports, protocols, file paths, service names, hostname patterns, system settings, magic numbers) MUST be consolidated as constants at the top of the script in logical subsections. Group related constants together (Service Configuration, Hostname Patterns, System Paths, etc.). Use uppercase constant names with descriptive prefixes. See `CONTRIBUTING.md` section 7 for detailed requirements and examples. Reference implementation: `services/cf-tunnel-ops.py`.
+- **Configuration Consolidation (MANDATORY)**: **ALL** hardcoded configuration values (ports, protocols, file paths, service names, hostname patterns, system settings, magic numbers) MUST be consolidated as constants at the top of the script in logical subsections. Group related constants together (Service Configuration, Hostname Patterns, System Paths, etc.). Use uppercase constant names with descriptive prefixes. See `dev-guide.md` section 7 for detailed requirements and examples. Reference implementation: `services/cf-tunnel-ops.py`.
 - **Guided Discovery**: When a script requires an ID or token that a user might not have handy, provide a direct URL to the service provider's dashboard in the prompt. Use consolidated constants for these URLs.
 - **Path Handling**: Use `pathlib.Path` and always handle user home expansion (`~`).
 

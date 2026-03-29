@@ -30,9 +30,17 @@ from rich.panel import Panel
 
 import questionary
 
-from helpers.core import load_pas_config, save_pas_config, format_menu_choices, prompt_toolkit_menu, Menu
+from helpers.core import load_pas_config, save_pas_config, format_menu_choices, prompt_toolkit_menu, Menu, get_pas_config_dir
 
 console = Console()
+
+
+def _ask_debug_enabled(args) -> bool:
+    return bool(getattr(args, "debug", False)) or os.environ.get("PAS_DEBUG", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 def check_platform():
     """Check if the current platform is macOS and warn if not."""
@@ -161,43 +169,164 @@ def cmd_repo(args):
     console.print("Opening in default browser...\n")
     webbrowser.open(url)
 
+def get_all_ai_configs():
+    from helpers.core import list_profiles_by_capability
+    ai_profiles = list_profiles_by_capability("ai")
+    configs = {}
+    for p in ai_profiles:
+        provider = p.get("provider")
+        p_config = load_pas_config(provider)
+        for c_id, c_data in p_config.get("configs", {}).items():
+            configs[c_id] = {**c_data, "provider": provider}
+    return configs
+
 def cmd_ask(args):
     """Ask an AI assistant about available tools."""
-    ai_models_config = load_pas_config("ai-models")
+    from helpers.core import list_profiles_by_capability, get_git_info
+
+    debug = _ask_debug_enabled(args)
+
+    def d(msg: str) -> None:
+        if debug:
+            # Escape leading '[' so Rich does not treat "[pas ask debug]" as markup.
+            console.print(f"[dim cyan]\\[pas ask debug][/dim cyan] {msg}")
+
+    d(f"pas.py: {__file__}")
+    d(f"PAS toolkit root: {get_pas_root()}")
+    cfg_dir = get_pas_config_dir()
+    d(f"config dir: {cfg_dir}")
+
+    pas_path = cfg_dir / "pas.json"
+    raw_pas: dict = {}
+    if pas_path.exists():
+        try:
+            raw_pas = json.loads(pas_path.read_text())
+        except json.JSONDecodeError as e:
+            d(f"pas.json: invalid JSON ({e})")
+    d(f"pas.json exists={pas_path.exists()} raw active_ai_config_id={raw_pas.get('active_ai_config_id')!r}")
+
+    # 1. Get active config ID from global pas.json
     pas_config = load_pas_config("pas")
-    
     active_config_id = pas_config.get("active_ai_config_id")
-    
+    d(f"after load_pas_config('pas'): active_ai_config_id={active_config_id!r}")
+
+    # 2. If not in pas.json, check project .pas.json
+    project_source = None
     if not active_config_id:
-        # Fallback to system default if any, or trigger setup
-        active_config_id = ai_models_config.get("active_config_id")
-        if not active_config_id:
-            setup_llm(ai_models_config)
+        git_info = get_git_info()
+        if git_info:
+            project_pas_path = Path(git_info["root"]) / ".pas.json"
+            d(f"project .pas.json: {project_pas_path} exists={project_pas_path.exists()}")
+            if project_pas_path.exists():
+                try:
+                    project_config = json.loads(project_pas_path.read_text())
+                    active_env = project_config.get("active_env", "development")
+                    active_config_id = (
+                        project_config.get("environments", {})
+                        .get(active_env, {})
+                        .get("intelligence", {})
+                        .get("active_ai_config_id")
+                    )
+                    if active_config_id:
+                        project_source = f"project .pas.json ({active_env})"
+                        console.print(f"[dim]Using active AI config from project ({active_env}): {active_config_id}[/dim]")
+                        d(f"resolved from {project_source}: {active_config_id!r}")
+                except Exception as ex:
+                    d(f"failed to read project .pas.json: {ex}")
+        else:
+            d("get_git_info() returned no repo root; skipping project .pas.json")
+
+    ai_profiles = list_profiles_by_capability("ai")
+    d(
+        f"list_profiles_by_capability('ai'): {len(ai_profiles)} profile(s) "
+        f"— {[(p.get('provider'), p.get('connection_id')) for p in ai_profiles]}"
+    )
+
+    # 3. Resolve the config data
+    active_config = None
+    all_configs: dict = {}  # Lazy load if needed
+
+    if active_config_id:
+        # Try direct reach: if ID is 'provider:config', try loading 'provider.json' first
+        if ":" in active_config_id:
+            provider_hint = active_config_id.split(":")[0]
+            hint_path = cfg_dir / f"{provider_hint}.json"
+            raw_provider: dict = {}
+            if hint_path.exists():
+                try:
+                    raw_provider = json.loads(hint_path.read_text())
+                except json.JSONDecodeError as e:
+                    d(f"{hint_path.name}: invalid JSON ({e})")
+            cfg_keys = list((raw_provider.get("configs") or {}).keys())
+            d(
+                f"direct reach: provider_hint={provider_hint!r} file={hint_path} exists={hint_path.exists()} "
+                f"config_ids_in_file={len(cfg_keys)} sample={cfg_keys[:12]!r}"
+            )
+            d(f"active_config_id in file configs: {active_config_id in (raw_provider.get('configs') or {})}")
+
+            p_config = load_pas_config(provider_hint)
+            d(f"load_pas_config({provider_hint!r}) returned configs count={len(p_config.get('configs') or {})}")
+            if p_config and "configs" in p_config and active_config_id in p_config["configs"]:
+                active_config = {**p_config["configs"][active_config_id], "provider": provider_hint}
+                d("direct reach: matched active_config in provider file")
+            else:
+                d("direct reach: no match (missing configs key or id not in configs)")
+
+        # If direct reach failed, try discovery
+        if not active_config:
+            all_configs = get_all_ai_configs()
+            d(f"discovery aggregate: {len(all_configs)} config id(s) — {sorted(all_configs.keys())[:15]!r}…")
+            active_config = all_configs.get(active_config_id)
+            if active_config:
+                d("discovery: matched active_config_id in aggregate")
+            else:
+                d(f"discovery: active_config_id {active_config_id!r} not in aggregate")
+
+    # 4. If still no active config, or discovery returned nothing, trigger setup
+    if not active_config:
+        if not all_configs:
+            all_configs = get_all_ai_configs()
+            d(f"lazy aggregate: {len(all_configs)} config id(s)")
+
+        if not all_configs:
+            d("no aggregated configs — calling setup_llm()")
+            setup_llm()
+            all_configs = get_all_ai_configs()
             pas_config = load_pas_config("pas")
             active_config_id = pas_config.get("active_ai_config_id")
-    
-    active_config = ai_models_config.get("configs", {}).get(active_config_id)
-    
-    if not active_config:
-        setup_llm(ai_models_config)
-        pas_config = load_pas_config("pas")
-        active_config_id = pas_config.get("active_ai_config_id")
-        active_config = ai_models_config.get("configs", {}).get(active_config_id)
+            active_config = all_configs.get(active_config_id)
+            d(f"after setup_llm: active_ai_config_id={active_config_id!r} aggregate={len(all_configs)}")
+
+        if not active_config and all_configs:
+            # Pick first available if not set or invalid
+            active_config_id = next(iter(all_configs.keys()))
+            active_config = all_configs.get(active_config_id)
+            d(f"fell back to first aggregate config: {active_config_id!r}")
 
     if not active_config:
         console.print("[red]Error: Could not determine active AI configuration.[/red]")
+        if not debug:
+            console.print("[dim]Run with [cyan]pas ask --debug[/cyan] or [cyan]PAS_DEBUG=1 pas ask …[/cyan] for resolution details.[/dim]")
         return
 
     profile_id = active_config.get("profile")
     model = active_config.get("model")
-    
-    profile_data = ai_models_config.get("profiles", {}).get(profile_id, {})
-    provider = profile_data.get("provider")
+    provider = active_config.get("provider")
+    d(f"resolved: provider={provider!r} profile={profile_id!r} model={model!r}")
+
+    profile_data = load_pas_config(provider, profile=profile_id)
     provider_token = profile_data.get("token")
-    
+    tok = provider_token or ""
+    d(
+        f"profile token: present={bool(tok)} "
+        f"storage={'SEC:…' if isinstance(tok, str) and tok.startswith('SEC:') else 'inline' if tok else 'missing'}"
+    )
+
     if not provider or not provider_token:
         console.print(f"[red]Error: Profile '{profile_id}' is missing provider or token.[/red]")
-        setup_llm(ai_models_config)
+        if not debug:
+            console.print("[dim]Use [cyan]pas ask --debug[/cyan] for paths and provider resolution.[/dim]")
+        setup_llm()
         return
 
     provider_config = {
@@ -205,24 +334,14 @@ def cmd_ask(args):
         "model": model
     }
     
-    # Validate token and get metadata
     is_valid, token_meta = validate_llm_token(provider, provider_token)
+    d(f"validate_llm_token: valid={is_valid} meta_keys={list((token_meta or {}).keys())}")
     if not provider_token or not is_valid:
         if provider_token:
             console.print(f"[bold red]Error:[/bold red] {provider} API token for profile '{profile_id}' is invalid or expired.")
-        setup_llm(ai_models_config)
-        # Reload everything after setup
-        ai_models_config = load_pas_config("ai-models")
-        pas_config = load_pas_config("pas")
-        active_config_id = pas_config.get("active_ai_config_id")
-        active_config = ai_models_config.get("configs", {}).get(active_config_id, {})
-        profile_id = active_config.get("profile")
-        model = active_config.get("model")
-        profile_data = ai_models_config.get("profiles", {}).get(profile_id, {})
-        provider = profile_data.get("provider")
-        provider_token = profile_data.get("token")
-        provider_config = {"token": provider_token, "model": model}
-        is_valid, token_meta = validate_llm_token(provider, provider_token)
+        d("token missing or failed validation — calling setup_llm()")
+        setup_llm()
+        return
 
     initial_query = " ".join(args.query).strip() if args.query else None
     is_interactive = not initial_query
@@ -230,20 +349,19 @@ def cmd_ask(args):
     while True:
         query = initial_query
         if is_interactive:
-            # Refresh config in case it was changed in the loop
-            ai_models_config = load_pas_config("ai-models")
+            all_configs = get_all_ai_configs()
             pas_config = load_pas_config("pas")
             active_config_id = pas_config.get("active_ai_config_id", "Not configured")
-            active_config = ai_models_config.get("configs", {}).get(active_config_id, {})
+            active_config = all_configs.get(active_config_id, {})
+            
             profile_id = active_config.get("profile", "N/A")
             model = active_config.get("model", "N/A")
+            provider = active_config.get("provider", "N/A")
             
-            profile_data = ai_models_config.get("profiles", {}).get(profile_id, {})
-            provider = profile_data.get("provider", "N/A")
+            profile_data = load_pas_config(provider, profile=profile_id)
             provider_token = profile_data.get("token")
             provider_config = {"token": provider_token, "model": model}
             
-            # Interactive mode
             menu_choices = [
                 {"title": "Ask a question", "value": "ASK"},
                 {"title": f"Switch/Setup AI Config (Current: {active_config_id})", "value": "SETUP"},
@@ -255,25 +373,20 @@ def cmd_ask(args):
             if action == "QUIT" or not action:
                 return
             elif action == "SETUP":
-                setup_llm(ai_models_config)
+                setup_llm()
                 continue
             
             query = questionary.text("Enter your question:").ask()
             if not query:
                 continue
 
-        # Re-validate token and get metadata for current provider
         _, token_meta = validate_llm_token(provider, provider_token)
-
-        # Prepare tools info
         tools = get_tools_info()
         tools_context = "\n".join([f"- {name}: {desc}" for name, desc in tools])
         
-        # Get token age for display
         from helpers.core import get_secret_age, SECRET_ROTATION_DAYS
-        token_age = get_secret_age("ai-models", f"profiles.{profile_id}.token")
+        token_age = get_secret_age(provider, f"profiles.{profile_id}.token")
         
-        # Try to get actual expiration from OpenRouter metadata
         actual_expiry_days = None
         if token_meta and "expires_at" in token_meta and token_meta["expires_at"]:
             try:
@@ -354,17 +467,16 @@ Below is a list of available tools and their detailed descriptions (extracted fr
             console.print(f"[bold red]Error:[/bold red] {error_msg}")
             if "403" in error_msg or "401" in error_msg:
                 if questionary.confirm("The API token seems invalid. Would you like to re-configure it?").ask():
-                    setup_llm(ai_models_config)
+                    setup_llm()
                     if not is_interactive:
-                        # Re-run the call if not interactive
-                        ai_models_config = load_pas_config("ai-models")
+                        all_configs = get_all_ai_configs()
                         pas_config = load_pas_config("pas")
                         active_config_id = pas_config.get("active_ai_config_id")
-                        active_config = ai_models_config.get("configs", {}).get(active_config_id, {})
+                        active_config = all_configs.get(active_config_id, {})
                         profile_id = active_config.get("profile")
                         model = active_config.get("model")
-                        profile_data = ai_models_config.get("profiles", {}).get(profile_id, {})
-                        provider = profile_data.get("provider")
+                        provider = active_config.get("provider")
+                        profile_data = load_pas_config(provider, profile=profile_id)
                         provider_token = profile_data.get("token")
                         provider_config = {"token": provider_token, "model": model}
                         try:
@@ -380,14 +492,17 @@ Below is a list of available tools and their detailed descriptions (extracted fr
         if not is_interactive:
             break
 
-def setup_llm(config):
+def setup_llm():
     """Setup AI configuration using ai-ops.py or internal logic."""
+    from helpers.core import list_profiles_by_capability
+    ai_profiles = list_profiles_by_capability("ai")
     pas_config = load_pas_config("pas")
     active_config_id = pas_config.get("active_ai_config_id")
 
-    # Menu for existing configs or new one
+    all_configs = get_all_ai_configs()
+
     choices = []
-    for cfg_id in config.get("configs", {}).keys():
+    for cfg_id in all_configs.keys():
         is_active = cfg_id == active_config_id
         title = f"{cfg_id} {'(ACTIVE)' if is_active else ''}"
         choices.append({"title": title, "value": cfg_id})
@@ -404,45 +519,51 @@ def setup_llm(config):
         return
 
     if selected == "AI_OPS":
-        # Call ai-ops.py
         subprocess.run([sys.executable, str(get_pas_root() / "services" / "ai-ops.py"), "list"])
-        # After returning, reload config
-        new_config = load_pas_config("ai-models")
-        config.clear()
-        config.update(new_config)
-        return setup_llm(config)
+        return setup_llm()
 
     if selected == "NEW":
-        # Select Profile
-        profiles = config.get("profiles", {})
-        if not profiles:
+        if not ai_profiles:
             console.print("[yellow]No profiles found. Let's create one.[/yellow]")
             provider = "openrouter"
             profile_id = questionary.text("Enter Profile ID (e.g., 'default'):").ask()
             if not profile_id: return
             token = questionary.password(f"Enter {provider} API Token:").ask()
             if not token: return
-            config["profiles"][profile_id] = {"provider": provider, "token": token}
-            save_pas_config("ai-models", config)
+            
+            p_config = load_pas_config(provider)
+            if "profiles" not in p_config: p_config["profiles"] = {}
+            p_config["profiles"][profile_id] = {"provider": provider, "token": token}
+            p_config["capabilities"] = ["ai", "intelligence"]
+            p_config["provider"] = provider
+            save_pas_config(provider, p_config)
+            ai_profiles = list_profiles_by_capability("ai")
         else:
-            profile_choices = [{"title": pid, "value": pid} for pid in profiles]
+            profile_choices = [{"title": f"[{p.get('provider').upper()}] {p.get('connection_id')}", "value": p} for p in ai_profiles]
             profile_choices.append({"title": "[Create new profile]", "value": "NEW_PROFILE"})
-            selected_profile = prompt_toolkit_menu(format_menu_choices(profile_choices, title_field="title", value_field="value"))
-            if selected_profile == "NEW_PROFILE":
-                provider = "openrouter"
+            selected_p = prompt_toolkit_menu(format_menu_choices(profile_choices, title_field="title", value_field="value"))
+            
+            if selected_p == "NEW_PROFILE":
+                provider = questionary.select("Select Provider:", choices=["google", "openrouter", "openai", "anthropic"]).ask()
+                if not provider: return
                 profile_id = questionary.text("Enter Profile ID:").ask()
                 if not profile_id: return
                 token = questionary.password(f"Enter {provider} API Token:").ask()
                 if not token: return
-                config["profiles"][profile_id] = {"provider": provider, "token": token}
-                save_pas_config("ai-models", config)
+                
+                p_config = load_pas_config(provider)
+                if "profiles" not in p_config: p_config["profiles"] = {}
+                p_config["profiles"][profile_id] = {"provider": provider, "token": token}
+                p_config["capabilities"] = ["ai", "intelligence"]
+                p_config["provider"] = provider
+                save_pas_config(provider, p_config)
+                ai_profiles = list_profiles_by_capability("ai")
             else:
-                profile_id = selected_profile
+                profile_id = selected_p.get("connection_id")
+                provider = selected_p.get("provider")
 
         if not profile_id: return
-        provider = config["profiles"][profile_id]["provider"]
 
-        # Select Model
         model = "openai/gpt-4o-mini"
         if provider == "openrouter":
             console.print("[cyan]Fetching available models from OpenRouter...[/cyan]")
@@ -461,24 +582,24 @@ def setup_llm(config):
                 model = questionary.text("Enter model ID:").ask()
             else:
                 model = model_choice
+        else:
+            model = questionary.text(f"Enter {provider} model ID:").ask()
 
         if not model: return
 
-        # Save configuration
         config_id = f"{profile_id}:{model}"
-        config["configs"][config_id] = {"profile": profile_id, "model": model}
-        save_pas_config("ai-models", config)
+        p_config = load_pas_config(provider)
+        if "configs" not in p_config: p_config["configs"] = {}
+        p_config["configs"][config_id] = {"profile": profile_id, "model": model}
+        save_pas_config(provider, p_config)
         
-        # Save app-specific choice
         pas_config["active_ai_config_id"] = config_id
         save_pas_config("pas", pas_config)
         console.print(f"[green]Configuration '{config_id}' saved and set as active for 'pas'.[/green]")
     else:
-        # Switch to existing
         pas_config["active_ai_config_id"] = selected
         save_pas_config("pas", pas_config)
         console.print(f"[green]Switched to configuration '{selected}' for 'pas'.[/green]")
-
 
 def get_openrouter_models():
     """Fetch and filter popular models from OpenRouter API."""
@@ -566,6 +687,23 @@ def call_llm(provider, provider_config, system_prompt, query):
             except:
                 pass
             raise Exception(f"HTTP Error {e.code}: {e.reason}\n{error_body}")
+    elif provider in ["google", "gemini"]:
+        # Standard Gemini API (direct)
+        token = provider_config['token']
+        model = provider_config['model']
+        model_id = model.split('/')[-1]
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_id}:generateContent?key={token}"
+        headers = {"Content-Type": "application/json"}
+        data = {"contents": [{"parts": [{"text": f"{system_prompt}\n\nUser: {query}"}]}]}
+        req = urllib.request.Request(url, data=json.dumps(data).encode("utf-8"), headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                res = json.loads(resp.read().decode())
+                if "candidates" in res and res["candidates"]:
+                    return res["candidates"][0]["content"]["parts"][0]["text"]
+                return f"No response content. Full response: {json.dumps(res)}"
+        except Exception as e:
+            raise Exception(f"Gemini API Error: {str(e)}")
     else:
         raise Exception(f"Unsupported provider: {provider}")
 
@@ -662,7 +800,29 @@ def cmd_list(args):
         print(f"{num_str:<{padding + 2}} {name:<20} {desc}")
     print(f"\nTotal: {num_tools} tools found.\n")
 
+def _apply_ask_debug_argv_hack() -> None:
+    """
+    Handle `pas ask --debug ...` before argparse. Sets PAS_DEBUG=1 and removes --debug
+    from sys.argv so the ask subparser never sees an unknown flag on older merges; once
+    upgraded, optional --debug on the ask parser still works via env for cmd_ask.
+    """
+    av = sys.argv
+    if len(av) < 3 or av[1] != "ask":
+        return
+    new = [av[0], "ask"]
+    stripped = False
+    for a in av[2:]:
+        if a == "--debug":
+            os.environ["PAS_DEBUG"] = "1"
+            stripped = True
+            continue
+        new.append(a)
+    if stripped:
+        sys.argv[:] = new
+
+
 def main():
+    _apply_ask_debug_argv_hack()
     check_platform()
     version = get_pas_version()
     parser = argparse.ArgumentParser(
@@ -692,6 +852,11 @@ The central command-line utility for managing this toolkit:
     subparsers.add_parser("repo", help="Open official GitHub repository").set_defaults(func=cmd_repo)
     ask_parser = subparsers.add_parser("ask", help="Ask an AI assistant about PAS tools")
     ask_parser.add_argument("query", nargs="*", help="The question to ask")
+    ask_parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print how active AI config is resolved (or set PAS_DEBUG=1)",
+    )
     ask_parser.set_defaults(func=cmd_ask)
 
     args = parser.parse_args()

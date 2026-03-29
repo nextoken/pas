@@ -9,7 +9,6 @@ AI AGENT GUIDELINES:
 - COMMANDS: Use `run_command` instead of raw `subprocess.run` for consistent error handling.
 - UI: This module re-exports TUI helpers from `.tui`. Use them for all interactivity.
 - PATHS: Always use `pathlib.Path` and handle `~` expansion for user inputs.
-  Use `normalize_path_input` when the user may paste shell-quoted paths.
 """
 
 import os
@@ -395,21 +394,6 @@ def get_pas_config_dir() -> Path:
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
 
-
-def normalize_path_input(raw: str) -> str:
-    """
-    Strip whitespace and one pair of matching outer single/double quotes.
-
-    Pasted paths often look like `"/path/to/file"`; without stripping, pathlib
-    treats the leading quote as a relative path segment. Use before
-    ``Path(...).expanduser().resolve()`` for interactive path inputs.
-    """
-    s = raw.strip()
-    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
-        s = s[1:-1].strip()
-    return s
-
-
 def load_pas_config(service: str, quiet: bool = False, profile: Optional[str] = None) -> Dict[str, Any]:
     """
     Load JSON config for a specific service from ~/.pas/service.json.
@@ -444,6 +428,53 @@ def load_pas_config(service: str, quiet: bool = False, profile: Optional[str] = 
             if not quiet:
                 print(f"Warning: Could not parse config for {service}. Returning empty dict.")
     return {}
+
+def list_profiles_by_capability(capability: str) -> List[Dict[str, Any]]:
+    """Aggregate profiles from all providers that support a specific capability."""
+    all_profiles = []
+    config_dir = get_pas_config_dir()
+    for path in config_dir.glob("*.json"):
+        # Skip backups and non-provider files
+        if "-" in path.stem or path.stem in ["pas", "sync", "apis"]:
+            continue
+        try:
+            data = json.loads(path.read_text())
+            # Check if this file has the requested capability
+            capabilities = data.get("capabilities", [])
+            provider = data.get("provider", path.stem)
+            
+            is_match = capability in capabilities
+            
+            # Fallback for AI capability
+            if not is_match and capability == "ai":
+                if path.stem in ["ai-models", "google", "openrouter", "gemini", "openai", "anthropic"]:
+                    is_match = True
+            
+            if is_match:
+                profiles = data.get("profiles", {})
+                # Handle legacy 'organizations' key for supabase
+                if not profiles and path.stem == "supabase":
+                    profiles = data.get("organizations", {})
+                
+                if not profiles:
+                    continue
+
+                for p_id, p_data in profiles.items():
+                    # Resolve secrets for the aggregated list
+                    resolved_p_data = _de_secretize(p_data, provider, quiet=True)
+                    all_profiles.append({
+                        "connection_id": p_id,
+                        "provider": provider,
+                        **resolved_p_data
+                    })
+        except Exception:
+            continue
+    return all_profiles
+
+def get_active_profile_id(service: str) -> Optional[str]:
+    """Get the active profile ID for a specific service (e.g. 'cloudflare', 'supabase')."""
+    config = load_pas_config(service, quiet=True)
+    return config.get("active_profile_id") or config.get("current_profile")
 
 def get_secret_age(service: str, key_path: str) -> Optional[int]:
     """
@@ -501,6 +532,10 @@ def save_pas_config(service: str, data: Dict[str, Any], profile: Optional[str] =
         # Also update 'current_profile' at the top level
         existing_config["current_profile"] = profile
         data = existing_config
+    
+    # Ensure 'provider' key is present at top level if missing
+    if "provider" not in data:
+        data["provider"] = service
 
     # Move secrets to Keychain and store references
     processed_data = _en_secretize(data, service)

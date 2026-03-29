@@ -43,9 +43,9 @@ TOOL_DESCRIPTION = (
 )
 # ---------------------
 
-def list_profiles() -> List[str]:
-    """List all available profiles from cf.json."""
-    config_file = get_pas_config_dir() / "cf.json"
+def list_profiles(provider: str = "cloudflare") -> List[str]:
+    """List all available profiles from provider config."""
+    config_file = get_pas_config_dir() / f"{provider}.json"
     if not config_file.exists():
         return []
     try:
@@ -55,20 +55,20 @@ def list_profiles() -> List[str]:
     except Exception:
         return []
 
-def get_current_profile() -> Optional[str]:
+def get_current_profile(provider: str = "cloudflare") -> Optional[str]:
     """Get the currently active profile."""
-    config_file = get_pas_config_dir() / "cf.json"
+    config_file = get_pas_config_dir() / f"{provider}.json"
     if not config_file.exists():
         return None
     try:
         data = json.loads(config_file.read_text())
-        return data.get("current_profile")
+        return data.get("active_profile_id") or data.get("current_profile")
     except Exception:
         return None
 
-def get_raw_config() -> Dict[str, Any]:
+def get_raw_config(provider: str = "cloudflare") -> Dict[str, Any]:
     """Load the raw config file without secretization/profile merging."""
-    config_file = get_pas_config_dir() / "cf.json"
+    config_file = get_pas_config_dir() / f"{provider}.json"
     if not config_file.exists():
         return {}
     try:
@@ -76,62 +76,16 @@ def get_raw_config() -> Dict[str, Any]:
     except Exception:
         return {}
 
-def migrate_flat_to_profile(profile_name: Optional[str] = None):
-    """Migrate flat config to a profile-based structure."""
-    raw_config = get_raw_config()
-    
-    # Check if migration is needed (no profiles key)
-    if "profiles" in raw_config:
-        console.print("[yellow]Configuration is already profile-based.[/yellow]")
-        return
-
-    # Extract flat config (excluding metadata)
-    flat_config = {k: v for k, v in raw_config.items() if not k.endswith("_meta")}
-    if not flat_config:
-        console.print("[yellow]No existing configuration found to migrate.[/yellow]")
-        return
-
-    token = load_pas_config("cf").get("CLOUDFLARE_API_TOKEN")
-    
-    if not profile_name and token:
-        console.print("[cyan]Attempting to discover organization name via API token...[/cyan]")
-        token_info = get_token_info(token)
-        if token_info:
-            profile_name = token_info.get("name") or token_info.get("label")
-            if profile_name:
-                console.print(f"[green]Discovered profile name: {profile_name}[/green]")
-        
-        if not profile_name:
-            user_info = get_user_details(token)
-            if user_info and user_info.get("success"):
-                profile_name = user_info.get("result", {}).get("email")
-                if profile_name:
-                    console.print(f"[green]Using user email as profile name: {profile_name}[/green]")
-
-    if not profile_name:
-        profile_name = input("Enter name for the migrated profile [default]: ").strip() or "default"
-
-    if prompt_yes_no(f"Migrate existing configuration to profile '{profile_name}'?", default=True):
-        # We use save_pas_config with the flat config to create the profile structure
-        # load_pas_config handles de-secretization so we get real values to re-secretize correctly
-        config_to_save = load_pas_config("cf")
-        save_pas_config("cf", config_to_save, profile=profile_name)
-        console.print(f"[green]Migration complete. Profile '{profile_name}' is now active.[/green]")
-
 def manage_profiles():
     """Interactive menu for profile management."""
     while True:
         current = get_current_profile()
         profiles = list_profiles()
         raw_config = get_raw_config()
-        has_flat_config = "profiles" not in raw_config and any(k for k in raw_config if not k.endswith("_meta"))
         
         console.print(f"\n[bold cyan]Current Profile:[/bold cyan] {current or '[None]'}")
         
         menu_items = []
-        if has_flat_config:
-            menu_items.append({"title": "[MIGRATE] Move existing flat config to a profile", "value": ("migrate", None)})
-
         if profiles:
             for p in profiles:
                 status = " (ACTIVE)" if p == current else ""
@@ -153,14 +107,10 @@ def manage_profiles():
             
         action, profile_name = selected
         
-        if action == "migrate":
-            migrate_flat_to_profile()
-            
-        elif action == "switch":
-            # Just updating current_profile is enough as save_pas_config handles it
-            # But we need to load the profile's data first
-            config = load_pas_config("cf", profile=profile_name)
-            save_pas_config("cf", config, profile=profile_name)
+        if action == "switch":
+            config = load_pas_config("cloudflare")
+            config["active_profile_id"] = profile_name
+            save_pas_config("cloudflare", config)
             console.print(f"[green]Switched to profile: {profile_name}[/green]")
             
         elif action == "create":
@@ -174,11 +124,20 @@ def manage_profiles():
             token = input("Enter Cloudflare API Token for this profile: ").strip()
             account_id = input("Enter Cloudflare Account ID for this profile (optional): ").strip()
             
-            new_config = {"CLOUDFLARE_API_TOKEN": token}
+            # Load existing config to preserve other fields
+            config = load_pas_config("cloudflare")
+            if "profiles" not in config: config["profiles"] = {}
+            if "capabilities" not in config: config["capabilities"] = ["frontend", "worker", "messaging", "storage", "network"]
+            if "provider" not in config: config["provider"] = "cloudflare"
+
+            config["profiles"][new_name] = {
+                "CLOUDFLARE_API_TOKEN": token
+            }
             if account_id:
-                new_config["CLOUDFLARE_ACCOUNT_ID"] = account_id
-                
-            save_pas_config("cf", new_config, profile=new_name)
+                config["profiles"][new_name]["CLOUDFLARE_ACCOUNT_ID"] = account_id
+            
+            config["active_profile_id"] = new_name
+            save_pas_config("cloudflare", config)
             console.print(f"[green]Created and switched to profile: {new_name}[/green]")
             
         elif action == "delete":
@@ -192,13 +151,13 @@ def manage_profiles():
                 continue
                 
             if prompt_yes_no(f"Are you sure you want to delete profile '{to_delete}'?", default=False):
-                config_file = get_pas_config_dir() / "cf.json"
+                config_file = get_pas_config_dir() / "cloudflare.json"
                 try:
                     data = json.loads(config_file.read_text())
                     if "profiles" in data and to_delete in data["profiles"]:
                         del data["profiles"][to_delete]
-                        if data.get("current_profile") == to_delete:
-                            data["current_profile"] = None
+                        if data.get("active_profile_id") == to_delete:
+                            data["active_profile_id"] = None
                         # We use raw write here to preserve other SEC: refs
                         safe_write_json(config_file, data)
                         console.print(f"[green]Deleted profile: {to_delete}[/green]")
@@ -231,8 +190,8 @@ def main():
         if args.switch not in profiles:
             console.print(f"[red]Profile '{args.switch}' not found.[/red]")
             sys.exit(1)
-        config = load_pas_config("cf", profile=args.switch)
-        save_pas_config("cf", config, profile=args.switch)
+        config = load_pas_config("cloudflare", profile=args.switch)
+        save_pas_config("cloudflare", config, profile=args.switch)
         console.print(f"[green]Switched to profile: {args.switch}[/green]")
         return
 

@@ -21,11 +21,22 @@ def main():
     if config_path.exists():
         try:
             config = json.loads(config_path.read_text())
-            active_id = config.get("active_org_id")
+            active_id = config.get("active_profile_id")
             if active_id:
-                token = config.get("organizations", {}).get(active_id, {}).get("access_token")
-                org_name = config.get("organizations", {}).get(active_id, {}).get("name")
-                console.print(f"[bold blue]Supabase CLI Wrapper[/bold blue] (active org: [cyan]{org_name}[/cyan])")
+                profiles = config.get("profiles", {})
+                profile_data = profiles.get(active_id, {})
+                
+                # Resolve token if it's a SEC: reference
+                raw_token = profile_data.get("access_token")
+                if raw_token and raw_token.startswith("SEC:"):
+                    # We need the core helper to resolve secrets
+                    from helpers.core import get_keychain_secret
+                    token = get_keychain_secret(raw_token[4:])
+                else:
+                    token = raw_token
+                
+                org_name = profile_data.get("name")
+                console.print(f"[bold blue]Supabase CLI Wrapper[/bold blue] (active profile: [cyan]{org_name}[/cyan])")
         except Exception:
             pass
 

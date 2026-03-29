@@ -23,7 +23,6 @@ from helpers.core import (
     console,
     format_menu_choices,
     load_pas_config,
-    normalize_path_input,
     prompt_toolkit_menu,
     save_pas_config,
 )
@@ -152,7 +151,7 @@ def setup_new_profile() -> None:
     if name in profiles:
         console.print(f"[yellow]Profile '{name}' already exists.[/yellow]")
         return
-    video_path = normalize_path_input(input("Video file path: "))
+    video_path = input("Video file path: ").strip()
     if not video_path:
         console.print("[yellow]Aborted.[/yellow]")
         return
@@ -196,10 +195,7 @@ def edit_profile(profile_key: str) -> None:
     p = profiles[profile_key]
     console.print(f"\n[bold]Edit profile: {p.get('name', profile_key)}[/bold]\n")
     name = input(f"Profile name [{p.get('name', profile_key)}]: ").strip() or p.get("name", profile_key)
-    raw_video = input(f"Video file path [{p.get('video_path', '')}]: ").strip()
-    video_path = (
-        normalize_path_input(raw_video) if raw_video else p.get("video_path", "")
-    )
+    video_path = input(f"Video file path [{p.get('video_path', '')}]: ").strip() or p.get("video_path", "")
     if video_path:
         path_expanded = str(Path(video_path).expanduser().resolve())
         if not Path(path_expanded).exists():
