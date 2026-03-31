@@ -5,7 +5,21 @@ This module is a bridge to the `pas_core` library.
 
 import sys
 from pathlib import Path
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
+
+
+def normalize_path_input(raw: str) -> str:
+    """
+    Strip whitespace and one pair of matching outer single/double quotes.
+
+    Pasted paths often look like '"/path/to/file"'; without stripping, pathlib
+    treats the leading quote as a relative path segment. Use before
+    Path(...).expanduser().resolve() for interactive path inputs.
+    """
+    s = raw.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        s = s[1:-1].strip()
+    return s
 
 # Bootstrap pas_core from local libs if not installed
 def bootstrap_core():
