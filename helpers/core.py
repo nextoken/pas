@@ -6,6 +6,8 @@ This module is a bridge to the `pas_core` library.
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, List
+import datetime
+import json
 
 
 def normalize_path_input(raw: str) -> str:
@@ -40,7 +42,47 @@ from pas_core import (
     backup_json_with_timestamp,
     set_keychain_secret,
     get_keychain_secret,
+    SECRET_ROTATION_DAYS,
 )
+
+
+def get_secret_age(service: str, key_path: str) -> Optional[int]:
+    """
+    Return secret age in days for a secretized key.
+
+    `key_path` uses dot notation (e.g. "profiles.default.token"). We look for the
+    corresponding "<key>_meta.created_at" field in the raw on-disk config.
+    """
+    try:
+        config_file = get_pas_config_dir() / f"{service}.json"
+        if not config_file.exists():
+            return None
+        raw = json.loads(config_file.read_text())
+
+        parts = [p for p in key_path.split(".") if p]
+        if not parts:
+            return None
+
+        cursor: Any = raw
+        for part in parts[:-1]:
+            if not isinstance(cursor, dict) or part not in cursor:
+                return None
+            cursor = cursor[part]
+
+        last = parts[-1]
+        if not isinstance(cursor, dict):
+            return None
+        meta = cursor.get(f"{last}_meta")
+        if not isinstance(meta, dict):
+            return None
+        created_at_str = meta.get("created_at")
+        if not created_at_str:
+            return None
+
+        created_at = datetime.datetime.fromisoformat(created_at_str)
+        return (datetime.datetime.now() - created_at).days
+    except Exception:
+        return None
 
 # Re-export UI components for convenience and backward compatibility
 try:

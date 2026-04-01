@@ -417,7 +417,7 @@ def cmd_ask(args):
                 pass
 
         dev_guide_content = ""
-        dev_guide_path = root / "dev-guide.md"
+        dev_guide_path = root / "CONTRIBUTING.md"
         if dev_guide_path.exists():
             try:
                 dev_guide_content = dev_guide_path.read_text(errors='ignore')

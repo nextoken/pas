@@ -29,6 +29,7 @@ from helpers.core import (
 )
 
 # --- Configuration ---
+DEFAULT_OUTPUT_DIR = "out"
 DEFAULT_DIFF_THRESHOLD = 0.005
 DEFAULT_MIN_INTERVAL = 5
 DEFAULT_MAX_FRAMES = 1000
@@ -363,7 +364,9 @@ def interactive_mode():
     start_ts = _hms_to_seconds(start_val)
     end_ts = _hms_to_seconds(end_val) if end_val else None
     
-    output_dir = _resolve_path(input(f"Output directory (default: {os.getcwd()}): ") or ".")
+    output_dir = _resolve_path(
+        input(f"Output directory (default: {DEFAULT_OUTPUT_DIR}): ") or DEFAULT_OUTPUT_DIR
+    )
     
     _display_extraction_summary(video_path, output_dir, start_ts, end_ts, mode, params)
     
@@ -396,9 +399,22 @@ def process_recursive(source_dir, filename, output_dir, mode, params, start_ts, 
 def main(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(description="Extract frames from video.")
     parser.add_argument("video", nargs="?", help="Input video file")
-    parser.add_argument("-o", "--output", help="Output directory")
+    parser.add_argument(
+        "-o",
+        "--output",
+        default=DEFAULT_OUTPUT_DIR,
+        help=f"Output directory (default: {DEFAULT_OUTPUT_DIR})",
+    )
     parser.add_argument("--mode", choices=["motion", "uniform"], help="Extraction mode")
-    parser.add_argument("--count", type=int, help="Number of frames for uniform mode")
+    parser.add_argument(
+        "-n",
+        "--no",
+        "--count",
+        dest="count",
+        type=int,
+        metavar="N",
+        help="Number of frames for uniform mode (-n / --no are aliases for --count)",
+    )
     parser.add_argument("--from", dest="start", default="00:00:00", help="Start timestamp")
     parser.add_argument("--to", dest="end", help="End timestamp")
     parser.add_argument("--diff-threshold", type=float, default=DEFAULT_DIFF_THRESHOLD)
@@ -418,7 +434,7 @@ def main(argv: Optional[List[str]] = None):
         parser.print_help()
         return
 
-    output_dir = _resolve_path(args.output or ".")
+    output_dir = _resolve_path(args.output)
     start_ts = _hms_to_seconds(args.start)
     end_ts = _hms_to_seconds(args.end) if args.end else None
     mode = args.mode or ("uniform" if (args.count or args.max_frames != DEFAULT_MAX_FRAMES and args.mode == "uniform") else "motion")

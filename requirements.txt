@@ -8,4 +8,6 @@ pyyaml
 packaging
 torch
 ultralytics
+opencv-python>=4.8
+fpdf2>=2.7
 
