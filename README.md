@@ -107,11 +107,12 @@ PAS uses a dedicated directory for your personal configurations, API keys, and t
 For detailed information on how to create, register, and maintain scripts in this repository, please refer to the [Development Guide](dev-guide.md).
 
 - **`ppui`**: Python Process User Intent - high-level abstract UI system for menus and prompts.
+- **`pas-core`**: Shared Python package for config, secrets, and project YAML semantics (`libs/pas-core/`). It ships **in-tree** with this repo (like `ppui`); you do **not** run `git submodule update` for it.
 
 ## Project Structure
 
 - `bin/`: Generated symlinks to executable scripts.
-- `libs/`: Internal libraries including `ppui` (PUI implementation).
+- `libs/`: Internal libraries including `ppui` (PUI implementation) and **`pas-core`** (shared core logic for CLI and console consumers).
 - `media/`: Scripts related to media processing (e.g., `vcut`).
 - `services/`: System-level setup and service configuration scripts.
 - `Makefile`: Project management commands.
