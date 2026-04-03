@@ -74,10 +74,11 @@ echo -e "${GREEN}Dependencies OK.${NC}"
 if [ -d "$PAS_DIR" ]; then
     echo -e "Updating PAS in $PAS_DIR..."
     cd "$PAS_DIR"
-    git pull
+    git pull --recurse-submodules=yes
+    git submodule update --init --recursive
 else
     echo -e "Cloning PAS to $PAS_DIR..."
-    git clone "$REPO_URL" "$PAS_DIR"
+    git clone --recursive "$REPO_URL" "$PAS_DIR"
     cd "$PAS_DIR"
 fi
 

@@ -143,8 +143,10 @@ def cmd_upgrade(args):
     old_version = get_pas_version()
     print(f"Upgrading PAS at {root} (Current version: {old_version})...")
     
-    # 1. git pull
-    if not run_command(["git", "pull"], cwd=root):
+    # 1. git pull (+ submodules: parent only records gitlinks; plain pull leaves them stale)
+    if not run_command(["git", "pull", "--recurse-submodules=yes"], cwd=root):
+        sys.exit(1)
+    if not run_command(["git", "submodule", "update", "--init", "--recursive"], cwd=root):
         sys.exit(1)
         
     # 2. make setup
