@@ -193,6 +193,42 @@ def deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any
             result[key] = value
     return result
 
+
+_ENV_KEY_SLUG_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def normalize_env_key(raw: str) -> str:
+    """Lowercase slug for comparisons; trim whitespace."""
+    return (raw or "").strip().lower()
+
+
+def is_valid_env_key_slug(s: str) -> bool:
+    """True if non-empty: letters, digits, underscore, hyphen; must start with a letter."""
+    if not s:
+        return False
+    return bool(_ENV_KEY_SLUG_RE.match(s))
+
+
+def coerce_environments_dict_keys(raw: Any) -> Dict[str, Any]:
+    """Normalize ``environments`` map keys (case/spacing); merge dict values when keys collide."""
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, Any] = {}
+    for k, v in raw.items():
+        nk = normalize_env_key(str(k))
+        if not nk:
+            continue
+        if nk in out:
+            cur = out[nk]
+            if isinstance(cur, dict) and isinstance(v, dict):
+                out[nk] = deep_merge(dict(cur), v)
+            else:
+                out[nk] = copy.deepcopy(v) if isinstance(v, dict) else v
+        else:
+            out[nk] = copy.deepcopy(v) if isinstance(v, dict) else v
+    return out
+
+
 def get_metadata_cards(config: PASProjectConfig) -> List[Dict[str, str]]:
     cards = []
     data = config.model_dump(exclude={"environments", "services"})
