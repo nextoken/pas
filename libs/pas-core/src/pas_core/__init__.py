@@ -269,7 +269,13 @@ def save_pas_config(service: str, data: Dict[str, Any], profile: Optional[str] =
     processed_data = _en_secretize(data, service)
     safe_write_json(config_file, processed_data, keep_backups=JSON_BACKUP_KEEP_DEFAULT, indent=2)
 
-def run_command(cmd: List[str], capture_output: bool = True, cwd: Optional[Path] = None, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
+def run_command(
+    cmd: List[str],
+    capture_output: bool = True,
+    cwd: Optional[Path] = None,
+    env: Optional[Dict[str, str]] = None,
+    timeout: Optional[float] = None,
+) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             cmd,
@@ -277,8 +283,11 @@ def run_command(cmd: List[str], capture_output: bool = True, cwd: Optional[Path]
             text=True,
             check=False,
             cwd=cwd,
-            env=env
+            env=env,
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(args=cmd, returncode=124, stdout="", stderr="timeout")
     except Exception as e:
         return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr=str(e))
 
@@ -293,7 +302,26 @@ def get_git_info() -> Optional[Dict[str, str]]:
         origin = res_origin.stdout.strip()
     return {"root": root, "origin": origin}
 
-from .git_utils import _github_url_from_path
+from .git_utils import (
+    _github_url_from_path,
+    github_remote_identity_key,
+    github_url_for_path,
+    normalize_github_remote_url,
+    read_git_remote_raw_url,
+)
+from .git_remote_providers import (
+    RemoteKind,
+    compare_remote_pins,
+    connection_url_to_browse_url,
+    infer_remote_kind_from_pinned_url,
+    normalize_generic_remote_url,
+    read_remote_url_via_git_cli,
+    remote_identity_key,
+    repo_web_url_for_path,
+    resolve_github_canonical_url_via_gh,
+    resolve_remote_pin_at_path,
+    to_preferred_ssh_remote_url,
+)
 
 from .config import (
     PASProjectConfig,
