@@ -69,6 +69,25 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/nextoken/pas/main/scripts/
 sh -c "$(wget -qO- https://raw.githubusercontent.com/nextoken/pas/main/scripts/install.sh)"
 ```
 
+### From a git checkout (standalone)
+
+PAS is usable without any parent repo: **`make setup`** installs **pas-core** and the rest so `helpers` and scripts get PyYAML, Rich, Pydantic, and keyring.
+
+```bash
+cd /path/to/pas    # directory that contains libs/, Makefile, requirements.txt
+make setup         # installs deps (pas-core + requirements + ppui), refreshes bin/, ~/bin_pas + PATH
+```
+
+`make setup` runs **`install-deps` first** (editable `libs/pas-core`, then `requirements.txt`, then `libs/ppui`), so you do not need a separate install step. If you use a **venv** (recommended on macOS with Homebrew Python / PEP 668), activate it and run `make setup PIP_ARGS=` so pip does not need `--break-system-packages`.
+
+To install Python dependencies only: `make install-deps`.
+
+Minimal install (pas-core only):
+
+```bash
+pip install -e libs/pas-core
+```
+
 ## Usage
 
 The `pas` command is the central entry point for the toolkit.

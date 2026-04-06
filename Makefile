@@ -1,26 +1,22 @@
+# Chain ensures install-deps always runs before refresh-bin / user-setup (also safe with make -j).
 .PHONY: setup
-setup: install-deps refresh-bin user-setup
+setup: user-setup
+
+# Used for system/Homebrew Python (PEP 668). Use empty for venv: `make setup PIP_ARGS=`
+PIP_ARGS ?= --break-system-packages
 
 .PHONY: install-deps
 install-deps:
-	@echo "Ensuring pip is up to date (needed for editable pyproject.toml installs)..."; \
-	python3 -m pip install -q --upgrade pip --break-system-packages || true
-	@if [ -f requirements.txt ]; then \
-		echo "Installing Python dependencies..."; \
-		python3 -m pip install -q -r requirements.txt --break-system-packages; \
-	fi
-	@if [ -d libs/ppui ]; then \
-		echo "Installing internal ppui library in editable mode..."; \
-		python3 -m pip install -q -e ./libs/ppui --break-system-packages; \
-	fi
+	@chmod +x scripts/install-deps.sh
+	@PIP_ARGS='$(PIP_ARGS)' ./scripts/install-deps.sh
 
 .PHONY: refresh-bin
-refresh-bin:
+refresh-bin: install-deps
 	@chmod +x scripts/refresh-bin
 	@./scripts/refresh-bin
 
 .PHONY: user-setup
-user-setup:
+user-setup: refresh-bin
 	ln -sfn $(CURDIR)/bin ~/bin_pas
 	@chmod +x scripts/setup-path
 	@./scripts/setup-path

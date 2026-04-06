@@ -87,11 +87,10 @@ echo -e "Running setup..."
 if command -v make >/dev/null 2>&1; then
     make setup
 else
-    echo -e "make not found, running setup scripts directly..."
-    # Fallback manual setup
+    echo -e "make not found, running install + setup scripts directly..."
+    chmod +x scripts/install-deps.sh scripts/refresh-bin scripts/setup-path
+    ./scripts/install-deps.sh
     ln -sfn "$PAS_DIR/bin" "$HOME/bin_pas"
-    chmod +x scripts/refresh-bin
-    chmod +x scripts/setup-path
     ./scripts/refresh-bin
     ./scripts/setup-path
 fi

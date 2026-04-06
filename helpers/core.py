@@ -28,6 +28,15 @@ def bootstrap_core():
     lib_path = Path(__file__).resolve().parent.parent / "libs" / "pas-core" / "src"
     if lib_path.exists() and str(lib_path) not in sys.path:
         sys.path.insert(0, str(lib_path))
+    try:
+        import yaml  # noqa: F401 — pas_core.config requires PyYAML at import time
+    except ImportError as e:
+        raise ImportError(
+            "pas_core needs PyYAML (and other deps declared in libs/pas-core). "
+            "From the PAS repo root run: make setup\n"
+            "Or: make install-deps  /  pip install -e libs/pas-core"
+        ) from e
+
 
 bootstrap_core()
 
