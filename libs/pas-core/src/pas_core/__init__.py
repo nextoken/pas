@@ -35,6 +35,9 @@ SECRET_ROTATION_DAYS = 30
 JSON_BACKUP_KEEP_DEFAULT = 5
 JSON_BACKUP_TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
 
+# ``~/.pas/pas.json`` — max rotated timestamped backups for ``console.yaml`` (see ``get_console_yaml_backup_keep``).
+CONSOLE_YAML_BACKUP_KEEP_KEY = "console_yaml_backup_keep"
+
 def _json_backup_path(path: Path, ts: str, counter: int = 0) -> Path:
     suffix = path.suffix or ".json"
     base = path.with_suffix("").name
@@ -224,6 +227,36 @@ def get_pas_config_dir() -> Path:
     config_dir = Path.home() / ".pas"
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
+
+
+def get_console_yaml_backup_keep() -> int:
+    """Return how many timestamped ``console.yaml`` backups to retain (rotation cap).
+
+    Reads ``CONSOLE_YAML_BACKUP_KEEP_KEY`` (``console_yaml_backup_keep``) from
+    ``~/.pas/pas.json``. Missing, invalid, or non-positive values fall back to
+    ``JSON_BACKUP_KEEP_DEFAULT`` (5). Capped at 500. Used with
+    ``backup_json_with_timestamp`` when saving ``console.yaml``.
+    """
+    path = get_pas_config_dir() / "pas.json"
+    if not path.is_file():
+        return JSON_BACKUP_KEEP_DEFAULT
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return JSON_BACKUP_KEEP_DEFAULT
+    if not isinstance(data, dict):
+        return JSON_BACKUP_KEEP_DEFAULT
+    raw = data.get(CONSOLE_YAML_BACKUP_KEEP_KEY)
+    if raw is None:
+        return JSON_BACKUP_KEEP_DEFAULT
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return JSON_BACKUP_KEEP_DEFAULT
+    if n < 1:
+        return JSON_BACKUP_KEEP_DEFAULT
+    return min(n, 500)
+
 
 def load_pas_config(service: str, quiet: bool = False, profile: Optional[str] = None) -> Dict[str, Any]:
     config_file = get_pas_config_dir() / f"{service}.json"
