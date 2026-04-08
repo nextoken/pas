@@ -358,10 +358,20 @@ from .git_remote_providers import (
 
 from .config import (
     PASProjectConfig,
+    GITIGNORE_RULE_PAS_PROJECT_YAML,
+    InitPasProjectYamlResult,
     PAS_PROJECT_STANDARD_ENV_KEYS,
+    PAS_PROJECT_YAML_FILENAME,
+    PAS_PROJECT_YML_FILENAME,
     SERVICE_CARD_DETAIL_PRIMARY_FIELDS,
     apply_service_env_patch,
     coerce_environments_dict_keys,
+    default_pas_project_document,
+    get_environments_list,
+    get_metadata_cards,
+    get_service_oriented_data,
+    get_services_refs,
+    init_pas_project_yaml,
     is_valid_env_key_slug,
     load_pas_project_config,
     load_pas_project_config_document,
@@ -369,12 +379,8 @@ from .config import (
     pas_provider_dev_config_path,
     pas_user_service_config_json_path,
     resolve_pas_project_config_path,
-    save_pas_project_config,
-    get_metadata_cards,
-    get_environments_list,
-    get_services_refs,
-    get_service_oriented_data,
     resolve_pas_provider_dev_config_path,
+    save_pas_project_config,
 )
 from .mtime_display import format_path_mtime_for_display, relative_mtime_ago
 from .service_config import (

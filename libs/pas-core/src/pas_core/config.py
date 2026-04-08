@@ -2,11 +2,30 @@ import copy
 import json
 import re
 import yaml
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
 from pydantic import BaseModel
 
 PAS_PROJECT_STANDARD_ENV_KEYS: tuple[str, ...] = ("local", "development", "production")
+
+PAS_PROJECT_YAML_FILENAME = ".pas.yaml"
+PAS_PROJECT_YML_FILENAME = ".pas.yml"
+GITIGNORE_RULE_PAS_PROJECT_YAML = ".pas.yaml"
+
+
+def default_pas_project_document() -> Dict[str, Any]:
+    """Skeleton for a new project YAML (``project``, ``services``, ``environments``)."""
+    return {"project": {}, "services": {}, "environments": {}}
+
+
+@dataclass(frozen=True)
+class InitPasProjectYamlResult:
+    path: Path
+    created: bool
+    skipped: bool
+    gitignore_path: Optional[Path]
+    gitignore_updated: bool
 
 class ProjectMeta(BaseModel):
     types_path: Optional[str] = None
@@ -183,6 +202,104 @@ def save_pas_project_config(
         backup_json_with_timestamp(path, keep=keep)
     atomic_write_text(path, content)
     return path
+
+
+def _path_is_under_or_equal(root: Path, path: Path) -> bool:
+    root_r = root.resolve()
+    path_r = path.resolve()
+    if path_r == root_r:
+        return True
+    try:
+        path_r.relative_to(root_r)
+        return True
+    except ValueError:
+        return False
+
+
+def _gitignore_lines_have_rule(lines: List[str], rule: str) -> bool:
+    target = rule.strip()
+    for line in lines:
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s == target:
+            return True
+    return False
+
+
+def _append_gitignore_rule(gitignore_path: Path, rule: str) -> None:
+    from pas_core import atomic_write_text
+
+    if gitignore_path.is_file():
+        text = gitignore_path.read_text(encoding="utf-8")
+    else:
+        text = ""
+    lines = text.splitlines()
+    if _gitignore_lines_have_rule(lines, rule):
+        return
+    if text and not text.endswith("\n"):
+        text += "\n"
+    text += f"{rule}\n"
+    atomic_write_text(gitignore_path, text)
+
+
+def _git_toplevel_for_path(path: Path) -> Optional[Path]:
+    """Return Git work tree root for ``path``, or None if not inside a repository."""
+    from pas_core import run_command
+
+    res = run_command(["git", "rev-parse", "--show-toplevel"], cwd=path)
+    if res.returncode != 0 or not (res.stdout or "").strip():
+        return None
+    return Path(res.stdout.strip()).resolve()
+
+
+def init_pas_project_yaml(
+    workdir: Path,
+    *,
+    ensure_gitignore: bool = True,
+) -> InitPasProjectYamlResult:
+    """Create ``.pas.yaml`` with a default skeleton if no project YAML exists in ``workdir``.
+
+    If ``.pas.yaml`` or ``.pas.yml`` already exists, does not overwrite. When ``ensure_gitignore``
+    is true and ``workdir`` lies inside a Git work tree, ensures ``.pas.yaml`` is listed in the
+    repository root ``.gitignore``.
+    """
+    wd = workdir.resolve()
+    yaml_p = wd / PAS_PROJECT_YAML_FILENAME
+    yml_p = wd / PAS_PROJECT_YML_FILENAME
+
+    if yaml_p.is_file() or yml_p.is_file():
+        return InitPasProjectYamlResult(
+            path=resolve_pas_project_config_path(wd),
+            created=False,
+            skipped=True,
+            gitignore_path=None,
+            gitignore_updated=False,
+        )
+
+    data = default_pas_project_document()
+    out_path = save_pas_project_config(wd, data)
+
+    gitignore_path: Optional[Path] = None
+    gitignore_updated = False
+    if ensure_gitignore:
+        root = _git_toplevel_for_path(wd)
+        if root is not None and _path_is_under_or_equal(root, wd):
+                gitignore_path = root / ".gitignore"
+                before = gitignore_path.is_file()
+                prev = gitignore_path.read_text(encoding="utf-8") if before else ""
+                _append_gitignore_rule(gitignore_path, GITIGNORE_RULE_PAS_PROJECT_YAML)
+                after = gitignore_path.read_text(encoding="utf-8") if gitignore_path.is_file() else ""
+                gitignore_updated = after != prev
+
+    return InitPasProjectYamlResult(
+        path=out_path,
+        created=True,
+        skipped=False,
+        gitignore_path=gitignore_path,
+        gitignore_updated=gitignore_updated,
+    )
+
 
 def deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
     result = base.copy()

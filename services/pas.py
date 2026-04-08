@@ -8,6 +8,7 @@ Subcommands:
 - upgrade: Pulls latest code and refreshes system environment/symlinks.
 - up: Alias for upgrade.
 - repo: Opens the official GitHub repository in your browser.
+- project init: Creates .pas.yaml in the current directory if missing (optional .gitignore update).
 """
 import argparse
 import datetime
@@ -31,6 +32,7 @@ from rich.panel import Panel
 import questionary
 
 from helpers.core import load_pas_config, save_pas_config, format_menu_choices, prompt_toolkit_menu, Menu, get_pas_config_dir
+from pas_core import GITIGNORE_RULE_PAS_PROJECT_YAML, init_pas_project_yaml
 
 console = Console()
 
@@ -802,6 +804,37 @@ def cmd_list(args):
         print(f"{num_str:<{padding + 2}} {name:<20} {desc}")
     print(f"\nTotal: {num_tools} tools found.\n")
 
+
+def cmd_project_init(args):
+    """Create ``.pas.yaml`` with default ``project`` / ``services`` / ``environments`` keys if absent."""
+    ensure_gitignore = not getattr(args, "no_gitignore", False)
+    result = init_pas_project_yaml(Path.cwd(), ensure_gitignore=ensure_gitignore)
+    if result.skipped:
+        console.print(
+            f"[yellow]Skipped:[/yellow] project YAML already exists at [cyan]{result.path}[/cyan]"
+        )
+        return
+    console.print(f"[green]Created[/green] [cyan]{result.path}[/cyan]")
+    if not ensure_gitignore:
+        console.print("[dim]Left .gitignore unchanged (--no-gitignore).[/dim]")
+        return
+    if result.gitignore_path is not None:
+        if result.gitignore_updated:
+            console.print(
+                f"[green]Updated[/green] [cyan]{result.gitignore_path}[/cyan] "
+                f"(added [cyan]{GITIGNORE_RULE_PAS_PROJECT_YAML}[/cyan])"
+            )
+        else:
+            console.print(
+                f"[dim].gitignore already ignores {GITIGNORE_RULE_PAS_PROJECT_YAML} "
+                f"({result.gitignore_path})[/dim]"
+            )
+    else:
+        console.print(
+            "[dim]Not in a Git repository (or not under a work tree root); skipped .gitignore.[/dim]"
+        )
+
+
 def _apply_ask_debug_argv_hack() -> None:
     """
     Handle `pas ask --debug ...` before argparse. Sets PAS_DEBUG=1 and removes --debug
@@ -843,6 +876,7 @@ The central command-line utility for managing this toolkit:
 - [cyan]upgrade[/cyan]: Automatically pulls latest changes and refreshes system symlinks.
 - [cyan]up[/cyan]: Alias for [cyan]upgrade[/cyan].
 - [cyan]repo[/cyan]: Opens the official GitHub repository in your browser.
+- [cyan]project init[/cyan]: Creates [cyan].pas.yaml[/cyan] here if missing (and may update [cyan].gitignore[/cyan]).
 """
     if len(sys.argv) == 1:
         console.print(Panel(info_text.strip(), title="pas", border_style="blue"))
@@ -860,6 +894,22 @@ The central command-line utility for managing this toolkit:
         help="Print how active AI config is resolved (or set PAS_DEBUG=1)",
     )
     ask_parser.set_defaults(func=cmd_ask)
+
+    project_parser = subparsers.add_parser(
+        "project",
+        help="PAS project YAML in the working directory",
+    )
+    project_sub = project_parser.add_subparsers(dest="project_cmd", required=True)
+    project_init = project_sub.add_parser(
+        "init",
+        help="Create .pas.yaml with project / services / environments if the file does not exist",
+    )
+    project_init.add_argument(
+        "--no-gitignore",
+        action="store_true",
+        help="Do not add .pas.yaml to the repository .gitignore",
+    )
+    project_init.set_defaults(func=cmd_project_init)
 
     args = parser.parse_args()
     if not getattr(args, "func", None):
