@@ -568,6 +568,485 @@ def enrich_supabase_service_card_base_info(base_info_display: Dict[str, str]) ->
             base_info_display["region"] = region
 
 
+# --- Cloudflare toolkit / API (PAS Console provider config) --------------------------------------
+
+DEFAULT_CLOUDFLARE_TOOLKIT_CAPABILITIES: List[str] = [
+    "frontend",
+    "worker",
+    "messaging",
+    "storage",
+    "network",
+]
+
+CLOUDFLARE_CAPABILITY_LABELS: Dict[str, str] = {
+    "frontend": "Frontend (Pages)",
+    "worker": "Worker (script)",
+    "messaging": "Messaging (Queues)",
+    "storage": "Storage (R2)",
+    "network": "Network (Tunnel)",
+    "domain": "Domain (DNS zone)",
+}
+
+
+def normalize_cloudflare_toolkit_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(config or {})
+    profiles = out.get("profiles")
+    if not isinstance(profiles, dict):
+        out["profiles"] = {}
+    active = (
+        out.get("active_profile_id")
+        or out.get("current_profile")
+        or ""
+    )
+    out["active_profile_id"] = str(active) if isinstance(active, str) else ""
+    caps = out.get("capabilities")
+    if not isinstance(caps, list):
+        caps = []
+    out["capabilities"] = [str(x).strip() for x in caps if str(x).strip()]
+    return out
+
+
+def get_cloudflare_toolkit_capabilities() -> List[str]:
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    got = cfg.get("capabilities", [])
+    if isinstance(got, list) and got:
+        return [str(x).strip() for x in got if str(x).strip()]
+    return list(DEFAULT_CLOUDFLARE_TOOLKIT_CAPABILITIES)
+
+
+def normalize_cloudflare_capability(raw: str, allowed: List[str]) -> str:
+    r = (raw or "").strip()
+    if r and r in allowed:
+        return r
+    return str(allowed[0]).strip() if allowed else ""
+
+
+def get_cloudflare_capability_options() -> List[Dict[str, str]]:
+    """Select options: id = capability slug, display_label = human text."""
+    out: List[Dict[str, str]] = []
+    for cap in get_cloudflare_toolkit_capabilities():
+        label = CLOUDFLARE_CAPABILITY_LABELS.get(cap, cap.replace("_", " ").title())
+        out.append({"id": cap, "display_label": label})
+    return out
+
+
+def get_cloudflare_profile_options() -> List[Dict[str, str]]:
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    profiles = cfg.get("profiles", {})
+    if not isinstance(profiles, dict):
+        return []
+    out: List[Dict[str, str]] = []
+    for profile_id in sorted(profiles.keys()):
+        raw = profiles.get(profile_id, {})
+        if not isinstance(raw, dict):
+            raw = {}
+        name = str(raw.get("name") or profile_id)
+        pid = str(profile_id)
+        out.append({"id": pid, "name": name, "display_label": f"{name} · {pid}"})
+    return out
+
+
+def _cloudflare_profile_dict(config: Dict[str, Any], profile_id: str) -> Dict[str, Any]:
+    profiles = config.get("profiles", {})
+    if not isinstance(profiles, dict):
+        return {}
+    p = profiles.get((profile_id or "").strip(), {})
+    return dict(p) if isinstance(p, dict) else {}
+
+
+def cloudflare_token_for_profile(profile_id: str) -> str:
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    prof = _cloudflare_profile_dict(cfg, profile_id)
+    return str(prof.get("CLOUDFLARE_API_TOKEN") or "").strip()
+
+
+def cloudflare_profile_token_storage_hint(profile_id: str) -> str:
+    path = Path.home() / ".pas" / "cloudflare.json"
+    if not path.is_file():
+        return "not configured"
+    try:
+        data = json.loads(path.read_text())
+    except Exception:
+        return "not configured"
+    profiles = data.get("profiles")
+    if not isinstance(profiles, dict):
+        return "not configured"
+    raw_prof = profiles.get((profile_id or "").strip(), {})
+    if not isinstance(raw_prof, dict):
+        return "not configured"
+    return _token_storage_hint(raw_prof.get("CLOUDFLARE_API_TOKEN"))
+
+
+def set_cloudflare_toolkit_profile_api_token(profile_id: str, plaintext: str) -> None:
+    pid = (profile_id or "").strip()
+    if not pid:
+        raise ValueError("profile_id is required")
+    path = Path.home() / ".pas" / "cloudflare.json"
+    data: Dict[str, Any] = {}
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            data = {}
+    if "profiles" not in data or not isinstance(data.get("profiles"), dict):
+        data["profiles"] = {}
+    profiles = data["profiles"]
+    prof = profiles.get(pid)
+    if not isinstance(prof, dict):
+        prof = {}
+    prof["CLOUDFLARE_API_TOKEN"] = plaintext
+    profiles[pid] = prof
+    data["profiles"] = profiles
+    processed = _en_secretize(data, "cloudflare")
+    safe_write_json(path, processed, indent=2)
+
+
+def _cloudflare_ssl_context():
+    return ssl._create_unverified_context() if os.environ.get("VERIFY_SSL") == "false" else None
+
+
+def _cloudflare_api_request_json(
+    method: str,
+    path: str,
+    token: str,
+    *,
+    timeout: float = 20.0,
+) -> tuple[Optional[Any], str]:
+    tok = (token or "").strip()
+    if not tok:
+        return None, "No API token configured."
+    p = path.lstrip("/")
+    url = f"https://api.cloudflare.com/client/v4/{p}"
+    req = urllib.request.Request(url, method=method.upper())
+    req.add_header("Authorization", f"Bearer {tok}")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("User-Agent", "pas-console/1.0 (Cloudflare API)")
+    ctx = _cloudflare_ssl_context()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
+            raw = json.loads(response.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode())
+        except Exception:
+            body = {}
+        errs = body.get("errors") if isinstance(body, dict) else None
+        if isinstance(errs, list) and errs:
+            em = str((errs[0] or {}).get("message") or e.reason)
+            return None, f"HTTP {e.code}: {em}"
+        return None, f"HTTP {e.code}"
+    except Exception as e:
+        return None, str(e)
+    if not isinstance(raw, dict):
+        return None, "Unexpected API response shape"
+    if raw.get("success") is False:
+        errs = raw.get("errors")
+        if isinstance(errs, list) and errs:
+            return None, str((errs[0] or {}).get("message") or "API error")
+        return None, "Cloudflare API success=false"
+    return raw.get("result"), ""
+
+
+def list_cloudflare_accounts(profile_id: str) -> List[Dict[str, str]]:
+    token = cloudflare_token_for_profile(profile_id)
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    prof = _cloudflare_profile_dict(cfg, profile_id)
+    pinned = str(prof.get("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+
+    result, err = _cloudflare_api_request_json("GET", "accounts", token)
+    out: List[Dict[str, str]] = []
+    if isinstance(result, list):
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            aid = str(item.get("id") or "").strip()
+            name = str(item.get("name") or "").strip() or aid
+            if not aid:
+                continue
+            out.append(
+                {
+                    "id": aid,
+                    "name": name,
+                    "display_label": f"{name} · {aid}",
+                }
+            )
+    if out:
+        return out
+    if pinned and not err:
+        return [{"id": pinned, "name": pinned, "display_label": f"{pinned} · (from profile)"}]
+    if pinned:
+        return [{"id": pinned, "name": pinned, "display_label": f"{pinned} · (from profile, list failed)"}]
+    return []
+
+
+def _format_cf_resource_label(name: str, rid: str) -> str:
+    n = (name or "").strip()
+    r = (rid or "").strip()
+    if n and r and n != r:
+        return f"{n} · {r}"
+    return n or r or ""
+
+
+def list_cloudflare_pages_projects(profile_id: str, account_id: str) -> List[Dict[str, str]]:
+    token = cloudflare_token_for_profile(profile_id)
+    aid = (account_id or "").strip()
+    if not aid:
+        return []
+    result, _err = _cloudflare_api_request_json(
+        "GET", f"accounts/{aid}/pages/projects", token
+    )
+    out: List[Dict[str, str]] = []
+    if not isinstance(result, list):
+        return out
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        pid = str(item.get("id") or "").strip()
+        if not name:
+            continue
+        out.append(
+            {
+                "resource_key": name,
+                "project_ref": name,
+                "project_name": name,
+                "pages_project_id": pid,
+                "display_label": _format_cf_resource_label(name, pid) or name,
+            }
+        )
+    return out
+
+
+def list_cloudflare_worker_scripts(profile_id: str, account_id: str) -> List[Dict[str, str]]:
+    token = cloudflare_token_for_profile(profile_id)
+    aid = (account_id or "").strip()
+    if not aid:
+        return []
+    result, _err = _cloudflare_api_request_json(
+        "GET", f"accounts/{aid}/workers/scripts", token
+    )
+    out: List[Dict[str, str]] = []
+    if not isinstance(result, list):
+        return out
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("id") or "").strip()
+        if not sid:
+            continue
+        out.append(
+            {
+                "resource_key": sid,
+                "worker_script_name": sid,
+                "display_label": sid,
+            }
+        )
+    return out
+
+
+def list_cloudflare_queues(profile_id: str, account_id: str) -> List[Dict[str, str]]:
+    token = cloudflare_token_for_profile(profile_id)
+    aid = (account_id or "").strip()
+    if not aid:
+        return []
+    result, _err = _cloudflare_api_request_json("GET", f"accounts/{aid}/queues", token)
+    out: List[Dict[str, str]] = []
+    if not isinstance(result, list):
+        return out
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        qid = str(item.get("queue_id") or "").strip()
+        qname = str(item.get("queue_name") or "").strip()
+        if not qid and not qname:
+            continue
+        key = qid or qname
+        out.append(
+            {
+                "resource_key": key,
+                "queue_id": qid,
+                "queue_name": qname or qid,
+                "display_label": _format_cf_resource_label(qname, qid) or key,
+            }
+        )
+    return out
+
+
+def list_cloudflare_r2_buckets(profile_id: str, account_id: str) -> List[Dict[str, str]]:
+    token = cloudflare_token_for_profile(profile_id)
+    aid = (account_id or "").strip()
+    if not aid:
+        return []
+    raw, _err = _cloudflare_api_request_json("GET", f"accounts/{aid}/r2/buckets", token)
+    out: List[Dict[str, str]] = []
+    buckets: Any = None
+    if isinstance(raw, dict):
+        buckets = raw.get("buckets")
+    if not isinstance(buckets, list):
+        return out
+    for item in buckets:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        loc = str(item.get("location") or "").strip()
+        label = f"{name} ({loc})" if loc else name
+        out.append(
+            {
+                "resource_key": name,
+                "r2_bucket_name": name,
+                "display_label": label,
+            }
+        )
+    return out
+
+
+def list_cloudflare_tunnels(profile_id: str, account_id: str) -> List[Dict[str, str]]:
+    token = cloudflare_token_for_profile(profile_id)
+    aid = (account_id or "").strip()
+    if not aid:
+        return []
+    result, _err = _cloudflare_api_request_json("GET", f"accounts/{aid}/tunnels", token)
+    out: List[Dict[str, str]] = []
+    if not isinstance(result, list):
+        return out
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        tid = str(item.get("id") or "").strip()
+        name = str(item.get("name") or "").strip() or tid
+        if not tid:
+            continue
+        out.append(
+            {
+                "resource_key": tid,
+                "tunnel_id": tid,
+                "tunnel_name": name,
+                "display_label": _format_cf_resource_label(name, tid),
+            }
+        )
+    return out
+
+
+def list_cloudflare_zones(profile_id: str, account_id: str) -> List[Dict[str, str]]:
+    token = cloudflare_token_for_profile(profile_id)
+    aid = (account_id or "").strip()
+    if not aid:
+        return []
+    result, _err = _cloudflare_api_request_json("GET", "zones", token)
+    out: List[Dict[str, str]] = []
+    if not isinstance(result, list):
+        return out
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        zid = str(item.get("id") or "").strip()
+        name = str(item.get("name") or "").strip()
+        acct = item.get("account")
+        acct_id = ""
+        if isinstance(acct, dict):
+            acct_id = str(acct.get("id") or "").strip()
+        if acct_id and acct_id != aid:
+            continue
+        if not zid:
+            continue
+        out.append(
+            {
+                "resource_key": zid,
+                "zone_id": zid,
+                "zone_name": name or zid,
+                "display_label": _format_cf_resource_label(name, zid),
+            }
+        )
+    return out
+
+
+def list_cloudflare_resource_options(
+    capability: str,
+    profile_id: str,
+    account_id: str,
+) -> List[Dict[str, str]]:
+    cap = (capability or "").strip().lower()
+    if cap == "frontend":
+        return list_cloudflare_pages_projects(profile_id, account_id)
+    if cap == "worker":
+        return list_cloudflare_worker_scripts(profile_id, account_id)
+    if cap == "messaging":
+        return list_cloudflare_queues(profile_id, account_id)
+    if cap == "storage":
+        return list_cloudflare_r2_buckets(profile_id, account_id)
+    if cap == "network":
+        return list_cloudflare_tunnels(profile_id, account_id)
+    if cap == "domain":
+        return list_cloudflare_zones(profile_id, account_id)
+    return []
+
+
+def _cloudflare_resource_key_from_yaml(capability: str, block: Dict[str, Any]) -> str:
+    cap = (capability or "").strip().lower()
+    if cap == "frontend":
+        return _resolve_service_value(block, "project_name", "project_ref", "name")
+    if cap == "worker":
+        return _resolve_service_value(block, "worker_script_name")
+    if cap == "messaging":
+        qid = _resolve_service_value(block, "queue_id")
+        if qid:
+            return qid
+        return _resolve_service_value(block, "queue_name")
+    if cap == "storage":
+        return _resolve_service_value(block, "r2_bucket_name")
+    if cap == "network":
+        return _resolve_service_value(block, "tunnel_id")
+    if cap == "domain":
+        return _resolve_service_value(block, "zone_id")
+    return ""
+
+
+def _cloudflare_view_model(service_name: str, service_block: Dict[str, Any]) -> Dict[str, Any]:
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    profiles = cfg.get("profiles", {})
+    active_profile_id = str(cfg.get("active_profile_id") or "")
+    active_profile = _cloudflare_profile_dict(cfg, active_profile_id)
+    raw_token = active_profile.get("CLOUDFLARE_API_TOKEN")
+    toolkit_caps = get_cloudflare_toolkit_capabilities()
+
+    connection_id = _resolve_service_value(service_block, "connection_id", "org_id")
+    account_id = _resolve_service_value(service_block, "account_id")
+    capability = normalize_cloudflare_capability(
+        _resolve_service_value(service_block, "cloudflare_capability", "capability"),
+        toolkit_caps,
+    )
+    resource_key = _cloudflare_resource_key_from_yaml(capability, service_block)
+
+    return {
+        "provider": "cloudflare",
+        "service_name": service_name,
+        "toolkit_path": str(resolve_pas_provider_dev_config_path("cloudflare")),
+        "toolkit_capabilities": toolkit_caps,
+        "active_profile_id": active_profile_id,
+        "active_profile_name": str(active_profile.get("name") or ""),
+        "connection_id": connection_id,
+        "account_id": account_id,
+        "cloudflare_capability": capability,
+        "cloudflare_resource_key": resource_key,
+        "project_name": _resolve_service_value(service_block, "project_name", "project_ref", "name"),
+        "pages_project_id": _resolve_service_value(service_block, "pages_project_id"),
+        "worker_script_name": _resolve_service_value(service_block, "worker_script_name"),
+        "queue_name": _resolve_service_value(service_block, "queue_name"),
+        "queue_id": _resolve_service_value(service_block, "queue_id"),
+        "r2_bucket_name": _resolve_service_value(service_block, "r2_bucket_name"),
+        "tunnel_name": _resolve_service_value(service_block, "tunnel_name"),
+        "tunnel_id": _resolve_service_value(service_block, "tunnel_id"),
+        "zone_name": _resolve_service_value(service_block, "zone_name"),
+        "zone_id": _resolve_service_value(service_block, "zone_id"),
+        "env_preview": "",
+        "token_masked": _mask_secret(str(raw_token or "")),
+        "token_storage": _token_storage_hint(active_profile.get("CLOUDFLARE_API_TOKEN")),
+        "token_available": bool(str(raw_token or "").strip()),
+    }
+
+
 def build_service_config_view_model(
     provider: str,
     service_name: str,
@@ -576,6 +1055,8 @@ def build_service_config_view_model(
     p = (provider or "").strip().lower()
     if p == "supabase":
         return _supabase_view_model(service_name, service_block or {})
+    if p == "cloudflare":
+        return _cloudflare_view_model(service_name, service_block or {})
     return {
         "provider": p or "unknown",
         "service_name": service_name,
@@ -591,8 +1072,35 @@ def reveal_service_secret(provider: str, view_model: Dict[str, Any]) -> str:
     then ``project_org_id`` / ``org_id`` / ``organization_id`` (toolkit YAML), then config
     ``active_profile_id``, then ``SUPABASE_ACCESS_TOKEN``. First non-empty wins. Needed so
     ``GET …/database/pooler`` runs and DB checks get multiple ``psql`` host candidates.
+
+    For ``cloudflare``, resolves ``CLOUDFLARE_API_TOKEN`` from the selected toolkit profile
+    (modal ``active_profile_id``), then YAML ``connection_id``, then toolkit default profile,
+    then ``CLOUDFLARE_API_TOKEN`` env.
     """
     p = (provider or "").strip().lower()
+    if p == "cloudflare":
+        cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+        profiles = cfg.get("profiles", {})
+        if not isinstance(profiles, dict):
+            return os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+
+        def token_for_profile_id(pid: str) -> str:
+            prof = profiles.get((pid or "").strip(), {})
+            if not isinstance(prof, dict):
+                return ""
+            return str(prof.get("CLOUDFLARE_API_TOKEN") or "").strip()
+
+        vm_active = str(view_model.get("active_profile_id") or "").strip()
+        conn = str(view_model.get("connection_id") or "").strip()
+        cfg_active = str(cfg.get("active_profile_id") or "").strip()
+        for pid in (vm_active, conn, cfg_active):
+            if not pid:
+                continue
+            t = token_for_profile_id(pid)
+            if t:
+                return t
+        return os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
+
     if p != "supabase":
         return ""
     config = normalize_supabase_toolkit_config(load_pas_config("supabase", quiet=True))
