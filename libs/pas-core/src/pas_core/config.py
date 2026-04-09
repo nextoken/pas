@@ -9,6 +9,9 @@ from pydantic import BaseModel
 
 PAS_PROJECT_STANDARD_ENV_KEYS: tuple[str, ...] = ("local", "development", "production")
 
+# Reserved target key for the repo root dashboard (“Overview”).
+PAS_TARGET_ROOT_KEY = "__root__"
+
 PAS_PROJECT_YAML_FILENAME = ".pas.yaml"
 PAS_PROJECT_YML_FILENAME = ".pas.yml"
 GITIGNORE_RULE_PAS_PROJECT_YAML = ".pas.yaml"
@@ -55,6 +58,18 @@ class PASProjectConfig(BaseModel):
     project: Optional[ProjectMeta] = None
     environments: Optional[Dict[str, EnvironmentConfig]] = None
     services: Optional[Union[List[str], Dict[str, Any]]] = None
+    # Per-target env assignments (participation + overrides). Values are free-form maps.
+    # Schema shape:
+    # targets:
+    #   __root__:
+    #     environments:
+    #       dev:
+    #         backend: { ...overrides... }
+    #   apps/web:
+    #     environments:
+    #       dev:
+    #         backend: { ...overrides... }
+    targets: Optional[Dict[str, Any]] = None
     
     model_config = {"extra": "allow"}
 
@@ -346,6 +361,91 @@ def coerce_environments_dict_keys(raw: Any) -> Dict[str, Any]:
     return out
 
 
+def normalize_target_key(raw: Optional[str]) -> str:
+    """Normalize a target key for storage/lookup.
+
+    - Empty/None => reserved root key.
+    - Otherwise use repo-relative paths (forward slashes) without leading/trailing slashes.
+    """
+    if raw is None:
+        return PAS_TARGET_ROOT_KEY
+    s = str(raw).strip()
+    if not s:
+        return PAS_TARGET_ROOT_KEY
+    s = s.replace("\\", "/").strip().strip("/")
+    return s or PAS_TARGET_ROOT_KEY
+
+
+def resolve_target_env_assignments(
+    config: PASProjectConfig,
+    target_key: Optional[str] = None,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Return per-target env assignments as a normalized map.
+
+    Output shape:
+      { env_key: { service_slot: {override_kv} } }
+
+    Legacy compatibility:
+    - If `config.targets` does not exist, interpret legacy `config.environments`
+      content (which historically stored env->slot->overrides) as assignments for
+      the root target only.
+    """
+    tk = normalize_target_key(target_key)
+
+    # New format: targets.<tk>.environments
+    if isinstance(config.targets, dict):
+        tblock = config.targets.get(tk)
+        if isinstance(tblock, dict):
+            envs = tblock.get("environments")
+            if isinstance(envs, dict):
+                out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+                for env_k, env_block in envs.items():
+                    ek = normalize_env_key(str(env_k))
+                    if not ek or not isinstance(env_block, dict):
+                        continue
+                    per_service: Dict[str, Dict[str, Any]] = {}
+                    for s_name, overrides in env_block.items():
+                        if overrides is None:
+                            # Treat explicit null as “not assigned”.
+                            continue
+                        if isinstance(overrides, dict):
+                            per_service[str(s_name)] = dict(overrides)
+                        else:
+                            # Participation with no override map: normalize to empty map.
+                            per_service[str(s_name)] = {}
+                    if per_service:
+                        out[ek] = per_service
+                return out
+
+    # Legacy: environments.<env>.<slot> stored at top-level, only for root.
+    if tk != PAS_TARGET_ROOT_KEY:
+        return {}
+
+    envs_legacy = config.environments or {}
+    out_legacy: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for env_name, env_cfg in envs_legacy.items():
+        ek = normalize_env_key(str(env_name))
+        if not ek:
+            continue
+        if hasattr(env_cfg, "model_dump"):
+            env_dict = env_cfg.model_dump(exclude_unset=True)
+        else:
+            env_dict = env_cfg
+        if not isinstance(env_dict, dict):
+            continue
+        per_service: Dict[str, Dict[str, Any]] = {}
+        for s_name, s_overrides in env_dict.items():
+            if s_overrides is None:
+                continue
+            if isinstance(s_overrides, dict):
+                per_service[str(s_name)] = dict(s_overrides)
+            else:
+                per_service[str(s_name)] = {}
+        if per_service:
+            out_legacy[ek] = per_service
+    return out_legacy
+
+
 def get_metadata_cards(config: PASProjectConfig) -> List[Dict[str, str]]:
     cards = []
     data = config.model_dump(exclude={"environments", "services"})
@@ -357,30 +457,61 @@ def get_metadata_cards(config: PASProjectConfig) -> List[Dict[str, str]]:
             })
     return sorted(cards, key=lambda x: x["title"])
 
-def get_environments_list(config: PASProjectConfig) -> List[Dict[str, str]]:
-    envs = config.environments or {}
+def get_environments_list_for_target(
+    config: PASProjectConfig,
+    target_key: Optional[str] = None,
+    *,
+    allowed_services: Optional[set[str]] = None,
+) -> List[Dict[str, str]]:
+    """Return merged environment JSON previews for a given target.
+
+    - `environments` keys are repo-wide definitions.
+    - Participation + overrides come from per-target assignments.
+    - `allowed_services` filters top-level service keys in the merged JSON.
+    """
     services_def = config.services if isinstance(config.services, dict) else {}
-    result = []
-    for env_name, env_config in envs.items():
-        if hasattr(env_config, "model_dump"):
-            env_dict = env_config.model_dump(exclude_unset=True)
-        else:
-            env_dict = env_config
-        resolved_env = {}
-        if isinstance(env_dict, dict):
-            for s_name, s_overrides in env_dict.items():
-                if s_overrides is None:
-                    continue
-                base_info = services_def.get(s_name, {})
-                if isinstance(s_overrides, dict):
-                    resolved_env[s_name] = deep_merge(base_info, s_overrides)
-                else:
-                    resolved_env[s_name] = base_info
-        result.append({
-            "name": str(env_name),
-            "data": json.dumps(resolved_env, indent=2)
-        })
+    env_defs = config.environments or {}
+
+    assignments = resolve_target_env_assignments(config, target_key)
+    result: List[Dict[str, str]] = []
+
+    # Preserve YAML ordering as much as possible by iterating env_defs keys first.
+    for env_name in env_defs.keys():
+        ek = normalize_env_key(str(env_name))
+        env_assign = assignments.get(ek, {})
+        resolved_env: Dict[str, Any] = {}
+        for s_name, s_overrides in env_assign.items():
+            if allowed_services is not None and str(s_name) not in allowed_services:
+                continue
+            base_info = services_def.get(s_name, {})
+            if isinstance(s_overrides, dict):
+                resolved_env[str(s_name)] = deep_merge(base_info, s_overrides)
+            else:
+                resolved_env[str(s_name)] = base_info
+        result.append({"name": ek, "data": json.dumps(resolved_env, indent=2)})
+
+    # Include env keys that exist in assignments but not in repo-wide definitions (should be rare).
+    for ek in sorted(assignments.keys()):
+        if any(normalize_env_key(str(n)) == ek for n in env_defs.keys()):
+            continue
+        env_assign = assignments.get(ek, {})
+        resolved_env: Dict[str, Any] = {}
+        for s_name, s_overrides in env_assign.items():
+            if allowed_services is not None and str(s_name) not in allowed_services:
+                continue
+            base_info = services_def.get(s_name, {})
+            if isinstance(s_overrides, dict):
+                resolved_env[str(s_name)] = deep_merge(base_info, s_overrides)
+            else:
+                resolved_env[str(s_name)] = base_info
+        result.append({"name": ek, "data": json.dumps(resolved_env, indent=2)})
+
     return result
+
+
+def get_environments_list(config: PASProjectConfig) -> List[Dict[str, str]]:
+    """Backward-compatible default: root target env previews."""
+    return get_environments_list_for_target(config, PAS_TARGET_ROOT_KEY)
 
 def get_services_refs(config: PASProjectConfig) -> List[Dict[str, Any]]:
     project_services = []
@@ -394,12 +525,20 @@ def get_services_refs(config: PASProjectConfig) -> List[Dict[str, Any]]:
                 project_services.append({"id": s_id, "config": {}})
     return project_services
 
-def get_service_oriented_data(config: PASProjectConfig) -> List[Dict[str, Any]]:
+def get_service_oriented_data_for_target(
+    config: PASProjectConfig,
+    target_key: Optional[str] = None,
+    *,
+    allowed_services: Optional[set[str]] = None,
+) -> List[Dict[str, Any]]:
     services_data = []
     services_def = config.services if isinstance(config.services, dict) else {}
-    envs = config.environments or {}
+    env_defs = config.environments or {}
+    assignments = resolve_target_env_assignments(config, target_key)
     active_env_name = config.active_env
     all_service_names = sorted(services_def.keys())
+    if allowed_services is not None:
+        all_service_names = [n for n in all_service_names if str(n) in allowed_services]
 
     for s_name in all_service_names:
         base_info = services_def.get(s_name, {})
@@ -407,17 +546,17 @@ def get_service_oriented_data(config: PASProjectConfig) -> List[Dict[str, Any]]:
             base_info = {}
         active_envs = []
         resolved_info = dict(base_info)
-        for env_name, env_config in envs.items():
-            if hasattr(env_config, "model_dump"):
-                env_dict = env_config.model_dump(exclude_unset=True)
-            else:
-                env_dict = env_config
-            if isinstance(env_dict, dict) and s_name in env_dict:
-                active_envs.append(env_name)
-                if env_name == active_env_name:
-                    s_overrides = env_dict.get(s_name, {})
-                    if isinstance(s_overrides, dict):
-                        resolved_info = deep_merge(dict(base_info), s_overrides)
+        # Determine env participation from per-target assignments, using env_defs order.
+        for env_name in env_defs.keys():
+            ek = normalize_env_key(str(env_name))
+            env_block = assignments.get(ek, {})
+            if not isinstance(env_block, dict) or s_name not in env_block:
+                continue
+            active_envs.append(ek)
+            if ek == normalize_env_key(str(active_env_name or "")):
+                s_overrides = env_block.get(s_name, {})
+                if isinstance(s_overrides, dict):
+                    resolved_info = deep_merge(dict(base_info), s_overrides)
 
         base_info_display: Dict[str, str] = {}
         for k, v in base_info.items():
@@ -475,3 +614,8 @@ def get_service_oriented_data(config: PASProjectConfig) -> List[Dict[str, Any]]:
         })
 
     return services_data
+
+
+def get_service_oriented_data(config: PASProjectConfig) -> List[Dict[str, Any]]:
+    """Backward-compatible default: root target service card data."""
+    return get_service_oriented_data_for_target(config, PAS_TARGET_ROOT_KEY)
