@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling>=1.26.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pas-toolkit"
+version = "0.1.0"
+description = "PAS toolkit CLI and workspace"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "pas-core",
+    "typer>=0.12.0",
+]
+
+[project.scripts]
+pas = "pas_cli.main:main"
+
+[tool.uv.sources]
+pas-core = { path = "libs/pas-core", editable = true }
+
+[tool.hatch.build.targets.wheel]
+packages = ["pas_cli"]

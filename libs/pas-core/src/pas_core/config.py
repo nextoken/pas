@@ -568,6 +568,11 @@ def get_service_oriented_data_for_target(
 
             enrich_supabase_service_card_base_info(base_info_display)
 
+        if (base_info_display.get("provider") or "").strip().lower() == "cloudflare":
+            from .service_config import enrich_cloudflare_service_card_base_info
+
+            enrich_cloudflare_service_card_base_info(base_info_display)
+
         base_skip = SERVICE_CARD_DETAIL_PRIMARY_KEYS | {"provider"}
         base_info_extra: List[Dict[str, str]] = []
         for k in sorted(base_info_display.keys()):

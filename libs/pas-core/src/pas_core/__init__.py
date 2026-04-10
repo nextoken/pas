@@ -21,6 +21,8 @@ SENSITIVE_KEYS = {
     "access_token",
     "api_key",
     "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_GLOBAL_API_KEY",
+    "CLOUDFLARE_API_KEY",
     "TUNNEL_TOKEN",
     "key",
     "pypi_token",
@@ -29,8 +31,27 @@ SENSITIVE_KEYS = {
     "database_password",
     "db_password",
 }
+
+# Always keychain these Cloudflare profile fields when saving ``cloudflare.json``, even if a stale
+# ``pas_core`` build omitted them from ``SENSITIVE_KEYS`` (e.g. CLI imported an old site-packages copy).
+_CLOUDFLARE_KEYCHAIN_KEYS = frozenset(
+    ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_GLOBAL_API_KEY", "CLOUDFLARE_API_KEY")
+)
+
+
+def _key_should_use_keychain(key: str, service: str) -> bool:
+    if key in SENSITIVE_KEYS:
+        return True
+    return service == "cloudflare" and key in _CLOUDFLARE_KEYCHAIN_KEYS
+
+
 KEYCHAIN_SERVICE = "pas-toolkit"
 SECRET_ROTATION_DAYS = 30
+
+# Process-local cache: ``load_pas_config`` / ``_de_secretize`` may run many times per CLI invocation
+# (e.g. ``cloudflare_profile_health``), resolving the same ``SEC:`` accounts each time. Without caching,
+# each lookup spawns ``security find-generic-password`` on macOS and can trigger repeated Keychain prompts.
+_KEYCHAIN_SECRET_CACHE: Dict[str, Optional[str]] = {}
 
 JSON_BACKUP_KEEP_DEFAULT = 5
 JSON_BACKUP_TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
@@ -124,45 +145,93 @@ def set_keychain_secret(account: str, value: str) -> None:
     if keyring:
         try:
             keyring.set_password(KEYCHAIN_SERVICE, account, value)
+            _KEYCHAIN_SECRET_CACHE[account] = value
             return
         except Exception:
             pass
     if sys.platform == "darwin":
+        sec_bin = "/usr/bin/security" if os.path.isfile("/usr/bin/security") else "security"
         subprocess.run(
-            ["security", "add-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w", value, "-U"],
+            [sec_bin, "add-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w", value, "-U"],
             capture_output=True,
             check=False,
         )
+    _KEYCHAIN_SECRET_CACHE[account] = value
 
 
 def get_keychain_secret(account: str) -> Optional[str]:
-    """Read a secret from OS secure storage, with macOS security(1) fallback."""
+    """Read a secret from OS secure storage, with macOS security(1) fallback.
+
+    Results are cached for the lifetime of the process so repeated config loads do not re-invoke
+    keychain backends (avoids multiple macOS prompts per ``cf-ops`` run).
+    """
+    if account in _KEYCHAIN_SECRET_CACHE:
+        return _KEYCHAIN_SECRET_CACHE[account]
+    result: Optional[str] = None
     if keyring:
         try:
-            return keyring.get_password(KEYCHAIN_SERVICE, account)
+            result = keyring.get_password(KEYCHAIN_SERVICE, account)
         except Exception:
-            pass
-    if sys.platform == "darwin":
+            result = None
+    if result is None and sys.platform == "darwin":
+        # Prefer the system binary so Keychain ACLs match what "Always Allow" records for `security`.
+        sec_bin = "/usr/bin/security" if os.path.isfile("/usr/bin/security") else "security"
         res = subprocess.run(
-            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"],
+            [sec_bin, "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"],
             capture_output=True,
             text=True,
             check=False,
         )
         if res.returncode == 0:
-            return res.stdout.strip()
-    return None
+            result = res.stdout.strip() or None
+    _KEYCHAIN_SECRET_CACHE[account] = result
+    return result
 
-def _needs_migration(data: Any) -> bool:
+
+# Matches SEC:… account ids embedded in ~/.pas JSON (quoted or unquoted).
+_SEC_REF_ACCOUNT_RE = re.compile(r"SEC:([^\"\\s,}\]]+)")
+
+def warm_pas_keychain_cache_from_disk() -> None:
+    """Preload ``get_keychain_secret`` for every ``SEC:`` account referenced under ``~/.pas``.
+
+    Reflex dev mode may spawn multiple Python processes (reload / backend workers); each has an
+    empty process cache, so without warming, ``_de_secretize`` can invoke Keychain lookups many
+    times during startup. Resolving each distinct account once up front keeps later loads on the
+    cache. Install ``keyring`` so reads prefer the native backend instead of ``security`` CLI.
+
+    Skips ``~/.pas/skills/**`` (same rule as the console service list).
+    """
+    root = get_pas_config_dir()
+    if not root.is_dir():
+        return
+    accounts: set[str] = set()
+    try:
+        for path in root.rglob("*.json"):
+            if "skills" in path.parts:
+                continue
+            try:
+                txt = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for m in _SEC_REF_ACCOUNT_RE.finditer(txt):
+                acct = (m.group(1) or "").strip()
+                if acct:
+                    accounts.add(acct)
+    except OSError:
+        return
+    for acct in sorted(accounts):
+        get_keychain_secret(acct)
+
+def _needs_migration(data: Any, service: str = "") -> bool:
     if isinstance(data, dict):
         for k, v in data.items():
-            if k in SENSITIVE_KEYS and isinstance(v, str) and not v.startswith("SEC:"):
+            if _key_should_use_keychain(k, service) and isinstance(v, str) and not v.startswith("SEC:"):
                 return True
-            if _needs_migration(v):
+            if _needs_migration(v, service):
                 return True
     elif isinstance(data, list):
         for item in data:
-            if _needs_migration(item):
+            if _needs_migration(item, service):
                 return True
     return False
 
@@ -171,7 +240,7 @@ def _en_secretize(data: Any, service: str, path: str = "") -> Any:
         new_dict = {}
         for k, v in data.items():
             full_path = f"{path}.{k}" if path else k
-            if k in SENSITIVE_KEYS and isinstance(v, str) and not v.startswith("SEC:"):
+            if _key_should_use_keychain(k, service) and isinstance(v, str) and not v.startswith("SEC:"):
                 account = f"{service}.{full_path}"
                 set_keychain_secret(account, v)
                 
@@ -184,7 +253,7 @@ def _en_secretize(data: Any, service: str, path: str = "") -> Any:
                     "created_at": existing_meta.get("created_at") or now,
                     "last_used_at": now
                 }
-            elif k.endswith("_meta") and k[:-5] in SENSITIVE_KEYS:
+            elif k.endswith("_meta") and _key_should_use_keychain(k[:-5], service):
                 continue
             else:
                 new_dict[k] = _en_secretize(v, service, full_path)
@@ -263,7 +332,7 @@ def load_pas_config(service: str, quiet: bool = False, profile: Optional[str] = 
     if config_file.exists():
         try:
             data = json.loads(config_file.read_text())
-            if _needs_migration(data):
+            if _needs_migration(data, service):
                 save_pas_config(service, data)
                 data = json.loads(config_file.read_text())
             
@@ -356,6 +425,19 @@ from .git_remote_providers import (
     to_preferred_ssh_remote_url,
 )
 
+from .ai_assistant_snippets import (
+    AGENTS_MARKER_END,
+    AGENTS_MARKER_START,
+    AGENTS_REL,
+    CURSOR_RULE_REL,
+    PAS_AI_ASSISTANT_SUMMARY,
+    agents_md_marked_block,
+    agents_md_snippet,
+    cursor_rule_mdc_snippet,
+    validated_project_root,
+    write_agents_md,
+    write_cursor_rule,
+)
 from .config import (
     PASProjectConfig,
     GITIGNORE_RULE_PAS_PROJECT_YAML,
@@ -392,6 +474,10 @@ from .service_config import (
     check_service_connectivity,
     check_supabase_org_connectivity,
     check_supabase_postgres_connectivity,
+    cloudflare_email_for_profile,
+    cloudflare_discover_accounts_from_credentials,
+    cloudflare_profile_credential_fields,
+    cloudflare_profile_health,
     cloudflare_profile_token_storage_hint,
     cloudflare_token_for_profile,
     fetch_supabase_management_project,
@@ -408,6 +494,7 @@ from .service_config import (
     resolve_supabase_database_password_plain,
     reveal_service_secret,
     set_cloudflare_toolkit_profile_api_token,
+    set_cloudflare_toolkit_profile_global_api_key,
     set_supabase_toolkit_database_password,
     set_supabase_toolkit_profile_access_token,
     supabase_database_password_storage_hint,

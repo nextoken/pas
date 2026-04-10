@@ -1,18 +1,16 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.26.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "pas-core"
 version = "0.1.0"
-description = "Core logic for the PAS toolkit"
-readme = "README.md"
-requires-python = ">=3.8"
+description = "PAS shared project config and toolkit helpers"
+requires-python = ">=3.10,<3.14"
 dependencies = [
-    "rich>=13.0.0",
-    "pydantic>=2.0.0",
-    "pyyaml>=6.0.0",
-    "keyring>=24.0.0",
+    "keyring>=25.0.0",
+    "pyyaml>=6.0.3",
+    "pydantic>=2.10,<2.11",
 ]
 
 [tool.hatch.build.targets.wheel]

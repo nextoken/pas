@@ -574,17 +574,32 @@ DEFAULT_CLOUDFLARE_TOOLKIT_CAPABILITIES: List[str] = [
     "frontend",
     "worker",
     "messaging",
+    "ai",
     "storage",
     "network",
+    "domain",
 ]
 
 CLOUDFLARE_CAPABILITY_LABELS: Dict[str, str] = {
     "frontend": "Frontend (Pages)",
     "worker": "Worker (script)",
     "messaging": "Messaging (Queues)",
+    "ai": "AI (Workers AI)",
     "storage": "Storage (R2)",
     "network": "Network (Tunnel)",
     "domain": "Domain (DNS zone)",
+}
+
+# Capabilities we can probe with existing GET list endpoints (see ``cloudflare_profile_health``).
+KNOWN_CLOUDFLARE_HEALTH_PROBE_CAPABILITIES: frozenset[str] = frozenset(
+    {"frontend", "worker", "messaging", "storage", "network", "domain"}
+)
+
+_CLOUDFLARE_AUTH_MODE_LABELS: Dict[str, str] = {
+    "api_token": "API token (Bearer Authorization)",
+    "global_api_key": "Global API Key (X-Auth-Email + X-Auth-Key)",
+    "api_token_as_x_auth_key": "Value in CLOUDFLARE_API_TOKEN with email (used as X-Auth-Key — use Global API Key field for clarity)",
+    "global_api_key_bearer": "Global API Key sent as Bearer (fallback when no separate API token)",
 }
 
 
@@ -655,9 +670,76 @@ def _cloudflare_profile_dict(config: Dict[str, Any], profile_id: str) -> Dict[st
 
 
 def cloudflare_token_for_profile(profile_id: str) -> str:
+    """Bearer API token only (empty when profile uses Global API Key + email)."""
     cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
     prof = _cloudflare_profile_dict(cfg, profile_id)
     return str(prof.get("CLOUDFLARE_API_TOKEN") or "").strip()
+
+
+def cloudflare_email_for_profile(profile_id: str) -> str:
+    """Dashboard login email when the profile uses Global API Key auth (else empty)."""
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    prof = _cloudflare_profile_dict(cfg, profile_id)
+    return _cloudflare_email_for_profile_dict(prof)
+
+
+def _cloudflare_global_key_for_profile_dict(prof: Dict[str, Any]) -> str:
+    return str(prof.get("CLOUDFLARE_GLOBAL_API_KEY") or prof.get("CLOUDFLARE_API_KEY") or "").strip()
+
+
+def _cloudflare_email_for_profile_dict(prof: Dict[str, Any]) -> str:
+    return str(prof.get("CLOUDFLARE_EMAIL") or prof.get("email") or "").strip()
+
+
+def _cloudflare_no_credentials_message(prof: Dict[str, Any]) -> str:
+    bearer = str(prof.get("CLOUDFLARE_API_TOKEN") or "").strip()
+    email = _cloudflare_email_for_profile_dict(prof)
+    gkey = _cloudflare_global_key_for_profile_dict(prof)
+    if gkey and not email:
+        return "Global API Key requires CLOUDFLARE_EMAIL (dashboard login email)."
+    if email and not gkey and not bearer:
+        return "Set CLOUDFLARE_GLOBAL_API_KEY or use CLOUDFLARE_API_TOKEN."
+    return "No Cloudflare credentials (API token or email + Global API Key)."
+
+
+def _cloudflare_labeled_auth_attempts(prof: Dict[str, Any]) -> List[Tuple[Dict[str, str], str]]:
+    """Ordered auth strategies with stable labels for diagnostics (401 → try next)."""
+    bearer = str(prof.get("CLOUDFLARE_API_TOKEN") or "").strip()
+    gkey = _cloudflare_global_key_for_profile_dict(prof)
+    email = _cloudflare_email_for_profile_dict(prof)
+    out: List[Tuple[Dict[str, str], str]] = []
+    seen: set[frozenset[tuple[str, str]]] = set()
+
+    def add(h: Dict[str, str], label: str) -> None:
+        key = frozenset(h.items())
+        if key not in seen:
+            seen.add(key)
+            out.append((h, label))
+
+    if bearer:
+        add({"Authorization": f"Bearer {bearer}"}, "api_token")
+    if email and gkey:
+        add({"X-Auth-Email": email, "X-Auth-Key": gkey}, "global_api_key")
+    if bearer and email and not gkey:
+        add({"X-Auth-Email": email, "X-Auth-Key": bearer}, "api_token_as_x_auth_key")
+    if not bearer and email and gkey:
+        add({"Authorization": f"Bearer {gkey}"}, "global_api_key_bearer")
+    return out
+
+
+def _cloudflare_api_auth_attempts_from_profile(prof: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Ordered auth strategies; 401 fallbacks try the next (API token vs Global API Key)."""
+    return [h for h, _ in _cloudflare_labeled_auth_attempts(prof)]
+
+
+def _cloudflare_api_auth_headers(profile_id: str) -> tuple[Dict[str, str], str]:
+    """Primary auth headers (first strategy); see :func:`_cloudflare_api_auth_attempts_from_profile`."""
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    prof = _cloudflare_profile_dict(cfg, profile_id)
+    attempts = _cloudflare_api_auth_attempts_from_profile(prof)
+    if attempts:
+        return attempts[0], ""
+    return {}, _cloudflare_no_credentials_message(prof)
 
 
 def cloudflare_profile_token_storage_hint(profile_id: str) -> str:
@@ -674,10 +756,15 @@ def cloudflare_profile_token_storage_hint(profile_id: str) -> str:
     raw_prof = profiles.get((profile_id or "").strip(), {})
     if not isinstance(raw_prof, dict):
         return "not configured"
-    return _token_storage_hint(raw_prof.get("CLOUDFLARE_API_TOKEN"))
+    if raw_prof.get("CLOUDFLARE_API_TOKEN"):
+        return _token_storage_hint(raw_prof.get("CLOUDFLARE_API_TOKEN"))
+    if _cloudflare_email_for_profile_dict(raw_prof) and _cloudflare_global_key_for_profile_dict(raw_prof):
+        return _token_storage_hint(raw_prof.get("CLOUDFLARE_GLOBAL_API_KEY") or raw_prof.get("CLOUDFLARE_API_KEY"))
+    return "not configured"
 
 
 def set_cloudflare_toolkit_profile_api_token(profile_id: str, plaintext: str) -> None:
+    """Store a Bearer API token; clears Global API Key auth on the same profile."""
     pid = (profile_id or "").strip()
     if not pid:
         raise ValueError("profile_id is required")
@@ -695,6 +782,44 @@ def set_cloudflare_toolkit_profile_api_token(profile_id: str, plaintext: str) ->
     if not isinstance(prof, dict):
         prof = {}
     prof["CLOUDFLARE_API_TOKEN"] = plaintext
+    for k in ("CLOUDFLARE_EMAIL", "CLOUDFLARE_GLOBAL_API_KEY", "CLOUDFLARE_API_KEY", "email"):
+        prof.pop(k, None)
+    profiles[pid] = prof
+    data["profiles"] = profiles
+    processed = _en_secretize(data, "cloudflare")
+    safe_write_json(path, processed, indent=2)
+
+
+def set_cloudflare_toolkit_profile_global_api_key(
+    profile_id: str, email: str, global_key_plaintext: str
+) -> None:
+    """Store Global API Key + account email; clears Bearer token on the same profile."""
+    pid = (profile_id or "").strip()
+    em = (email or "").strip()
+    if not pid:
+        raise ValueError("profile_id is required")
+    if not em:
+        raise ValueError("CLOUDFLARE_EMAIL is required for Global API Key auth")
+    if not (global_key_plaintext or "").strip():
+        raise ValueError("Global API Key value is required")
+    path = Path.home() / ".pas" / "cloudflare.json"
+    data: Dict[str, Any] = {}
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            data = {}
+    if "profiles" not in data or not isinstance(data.get("profiles"), dict):
+        data["profiles"] = {}
+    profiles = data["profiles"]
+    prof = profiles.get(pid)
+    if not isinstance(prof, dict):
+        prof = {}
+    prof.pop("CLOUDFLARE_API_TOKEN", None)
+    prof["CLOUDFLARE_EMAIL"] = em
+    prof.pop("email", None)
+    prof["CLOUDFLARE_GLOBAL_API_KEY"] = global_key_plaintext.strip()
+    prof.pop("CLOUDFLARE_API_KEY", None)
     profiles[pid] = prof
     data["profiles"] = profiles
     processed = _en_secretize(data, "cloudflare")
@@ -705,27 +830,25 @@ def _cloudflare_ssl_context():
     return ssl._create_unverified_context() if os.environ.get("VERIFY_SSL") == "false" else None
 
 
-def _cloudflare_api_request_json(
-    method: str,
-    path: str,
-    token: str,
+def _cloudflare_v4_request_full_once(
+    url: str,
+    auth: Dict[str, str],
     *,
+    method: str = "GET",
     timeout: float = 20.0,
-) -> tuple[Optional[Any], str]:
-    tok = (token or "").strip()
-    if not tok:
-        return None, "No API token configured."
-    p = path.lstrip("/")
-    url = f"https://api.cloudflare.com/client/v4/{p}"
+    ctx: Any = None,
+) -> tuple[Optional[Dict[str, Any]], str, bool]:
+    """Perform one Cloudflare v4 request. Returns ``(body, err, retry_other_auth)``; retry on HTTP 401 only."""
     req = urllib.request.Request(url, method=method.upper())
-    req.add_header("Authorization", f"Bearer {tok}")
+    for hk, hv in auth.items():
+        req.add_header(hk, hv)
     req.add_header("Content-Type", "application/json")
     req.add_header("User-Agent", "pas-console/1.0 (Cloudflare API)")
-    ctx = _cloudflare_ssl_context()
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
             raw = json.loads(response.read().decode())
     except urllib.error.HTTPError as e:
+        retry = e.code == 401
         try:
             body = json.loads(e.read().decode())
         except Exception:
@@ -733,29 +856,114 @@ def _cloudflare_api_request_json(
         errs = body.get("errors") if isinstance(body, dict) else None
         if isinstance(errs, list) and errs:
             em = str((errs[0] or {}).get("message") or e.reason)
-            return None, f"HTTP {e.code}: {em}"
-        return None, f"HTTP {e.code}"
+            return None, f"HTTP {e.code}: {em}", retry
+        return None, f"HTTP {e.code}", retry
     except Exception as e:
-        return None, str(e)
+        return None, str(e), False
     if not isinstance(raw, dict):
-        return None, "Unexpected API response shape"
+        return None, "Unexpected API response shape", False
     if raw.get("success") is False:
         errs = raw.get("errors")
         if isinstance(errs, list) and errs:
-            return None, str((errs[0] or {}).get("message") or "API error")
-        return None, "Cloudflare API success=false"
-    return raw.get("result"), ""
+            return None, str((errs[0] or {}).get("message") or "API error"), False
+        return None, "Cloudflare API success=false", False
+    return raw, "", False
 
 
-def list_cloudflare_accounts(profile_id: str) -> List[Dict[str, str]]:
-    token = cloudflare_token_for_profile(profile_id)
+def _cloudflare_api_get_full_traced(
+    profile_id: str,
+    rel_path: str,
+    *,
+    method: str = "GET",
+    timeout: float = 20.0,
+) -> tuple[Optional[Dict[str, Any]], str, str]:
+    """Like ``_cloudflare_api_get_full`` but returns ``(body, err, auth_mode_code)`` on success."""
     cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
     prof = _cloudflare_profile_dict(cfg, profile_id)
-    pinned = str(prof.get("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+    labeled = _cloudflare_labeled_auth_attempts(prof)
+    if not labeled:
+        return None, _cloudflare_no_credentials_message(prof), ""
+    p = rel_path.lstrip("/")
+    url = f"https://api.cloudflare.com/client/v4/{p}"
+    ctx = _cloudflare_ssl_context()
+    last_err = ""
+    for auth, mode_code in labeled:
+        raw, err, retry = _cloudflare_v4_request_full_once(
+            url, auth, method=method, timeout=timeout, ctx=ctx
+        )
+        if not err:
+            return raw, "", mode_code
+        last_err = err
+        if not retry:
+            return None, err, ""
+    return None, last_err, ""
 
-    result, err = _cloudflare_api_request_json("GET", "accounts", token)
-    out: List[Dict[str, str]] = []
-    if isinstance(result, list):
+
+def _cloudflare_api_get_full(
+    profile_id: str,
+    rel_path: str,
+    *,
+    method: str = "GET",
+    timeout: float = 20.0,
+) -> tuple[Optional[Dict[str, Any]], str]:
+    """GET a v4 path; return full JSON object on success (includes ``result``, ``result_info``).
+
+    Tries API token (Bearer) first when configured, then Global API Key (and cross-fallback on **401**
+    so a Global API Key stored in ``CLOUDFLARE_API_TOKEN`` still works when email is set).
+    """
+    raw, err, _mode = _cloudflare_api_get_full_traced(
+        profile_id, rel_path, method=method, timeout=timeout
+    )
+    return raw, err
+
+
+def _cloudflare_api_get_full_from_prof(
+    prof: Dict[str, Any],
+    rel_path: str,
+    *,
+    method: str = "GET",
+    timeout: float = 20.0,
+) -> tuple[Optional[Dict[str, Any]], str, str]:
+    """GET a v4 path using credential fields from a profile dict (no ``~/.pas`` read)."""
+    labeled = _cloudflare_labeled_auth_attempts(prof)
+    if not labeled:
+        return None, _cloudflare_no_credentials_message(prof), ""
+    p = rel_path.lstrip("/")
+    url = f"https://api.cloudflare.com/client/v4/{p}"
+    ctx = _cloudflare_ssl_context()
+    last_err = ""
+    for auth, mode_code in labeled:
+        raw, err, retry = _cloudflare_v4_request_full_once(
+            url, auth, method=method, timeout=timeout, ctx=ctx
+        )
+        if not err:
+            return raw, "", mode_code
+        last_err = err
+        if not retry:
+            return None, err, ""
+    return None, last_err, ""
+
+
+def _cloudflare_list_accounts_paginated_from_prof(
+    prof: Dict[str, Any],
+) -> tuple[List[Dict[str, str]], str]:
+    """Fetch all pages of ``GET /accounts`` using an in-memory profile dict."""
+    by_id: Dict[str, Dict[str, str]] = {}
+    page = 1
+    per_page = 50
+    max_pages = 100
+    last_err = ""
+    while page <= max_pages:
+        full, err, _mode = _cloudflare_api_get_full_from_prof(
+            prof, f"accounts?page={page}&per_page={per_page}"
+        )
+        if err or full is None:
+            last_err = err
+            break
+        result = full.get("result")
+        if not isinstance(result, list):
+            last_err = "Unexpected accounts list payload"
+            break
         for item in result:
             if not isinstance(item, dict):
                 continue
@@ -763,13 +971,155 @@ def list_cloudflare_accounts(profile_id: str) -> List[Dict[str, str]]:
             name = str(item.get("name") or "").strip() or aid
             if not aid:
                 continue
-            out.append(
-                {
-                    "id": aid,
-                    "name": name,
-                    "display_label": f"{name} · {aid}",
-                }
-            )
+            by_id[aid] = {
+                "id": aid,
+                "name": name,
+                "display_label": f"{name} · {aid}",
+            }
+        ri = full.get("result_info")
+        total_pages = 1
+        if isinstance(ri, dict):
+            tp = ri.get("total_pages")
+            if tp is not None:
+                try:
+                    total_pages = max(1, int(tp))
+                except (TypeError, ValueError):
+                    total_pages = 1
+            else:
+                try:
+                    tc = int(ri.get("total_count") or 0)
+                    pp_ri = int(ri.get("per_page") or per_page)
+                    pp_ri = max(1, pp_ri)
+                    if tc > 0:
+                        total_pages = max(1, (tc + pp_ri - 1) // pp_ri)
+                except (TypeError, ValueError):
+                    total_pages = 1
+        if page >= total_pages or not result:
+            break
+        page += 1
+    out = sorted(by_id.values(), key=lambda r: (r.get("name") or "").lower())
+    return out, last_err
+
+
+def cloudflare_profile_credential_fields(profile_id: str) -> Dict[str, Any]:
+    """Return de-secretized ``profiles[profile_id]`` only (no legacy root merge).
+
+    ``load_pas_config("cloudflare", profile=...)`` merges ``{**config, **profile}``, which can
+    pull a **root-level** ``CLOUDFLARE_API_TOKEN`` into the effective dict. API auth tries Bearer
+    first, so a stale root token causes **403 Invalid access token** even when the profile uses
+    Global API Key + email. Prefer this helper (or :func:`_cloudflare_profile_dict` on a full
+    load) for credential-only API calls.
+    """
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    return dict(_cloudflare_profile_dict(cfg, profile_id))
+
+
+def cloudflare_discover_accounts_from_credentials(
+    prof: Dict[str, Any],
+) -> tuple[List[Dict[str, str]], str]:
+    """List Cloudflare accounts using credential fields only (e.g. before saving to ``cloudflare.json``).
+
+    Pass a **profile-shaped** dict (only ``profiles[id]`` keys), *not* the merged dict from
+    ``load_pas_config(..., profile=...)``, unless you intend root-level keys to participate; see
+    :func:`cloudflare_profile_credential_fields`. Expect ``CLOUDFLARE_API_TOKEN`` and/or
+    ``CLOUDFLARE_EMAIL`` + ``CLOUDFLARE_GLOBAL_API_KEY``. Returns ``(rows, error_message)``.
+    """
+    return _cloudflare_list_accounts_paginated_from_prof(prof)
+
+
+def enrich_cloudflare_service_card_base_info(base_info_display: Dict[str, str]) -> None:
+    """Resolve ``account_id`` to ``<name> · <id>`` via ``GET /accounts/{id}`` when credentials work."""
+    pid = (base_info_display.get("connection_id") or "").strip()
+    aid = (base_info_display.get("account_id") or "").strip()
+    if not pid or not aid:
+        return
+    full, err = _cloudflare_api_get_full(pid, f"accounts/{aid}", timeout=5.0)
+    if err or not full:
+        return
+    result = full.get("result")
+    if not isinstance(result, dict):
+        return
+    name = str(result.get("name") or "").strip()
+    if name:
+        base_info_display["account_id"] = _format_display_name_with_trimmed_id(name, aid)
+
+
+def _cloudflare_api_request_json(
+    method: str,
+    path: str,
+    profile_id: str,
+    *,
+    timeout: float = 20.0,
+) -> tuple[Optional[Any], str]:
+    if method.upper() != "GET":
+        return None, "Unsupported HTTP method for Cloudflare API helper."
+    full, err = _cloudflare_api_get_full(profile_id, path, timeout=timeout)
+    if err or full is None:
+        return None, err
+    return full.get("result"), ""
+
+
+def _cloudflare_list_accounts_paginated(profile_id: str) -> tuple[List[Dict[str, str]], str]:
+    """Fetch all pages of ``GET /accounts`` (token may only return accounts it is scoped to)."""
+    by_id: Dict[str, Dict[str, str]] = {}
+    page = 1
+    per_page = 50
+    max_pages = 100
+    last_err = ""
+    while page <= max_pages:
+        full, err = _cloudflare_api_get_full(
+            profile_id, f"accounts?page={page}&per_page={per_page}"
+        )
+        if err or full is None:
+            last_err = err
+            break
+        result = full.get("result")
+        if not isinstance(result, list):
+            last_err = "Unexpected accounts list payload"
+            break
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            aid = str(item.get("id") or "").strip()
+            name = str(item.get("name") or "").strip() or aid
+            if not aid:
+                continue
+            by_id[aid] = {
+                "id": aid,
+                "name": name,
+                "display_label": f"{name} · {aid}",
+            }
+        ri = full.get("result_info")
+        total_pages = 1
+        if isinstance(ri, dict):
+            tp = ri.get("total_pages")
+            if tp is not None:
+                try:
+                    total_pages = max(1, int(tp))
+                except (TypeError, ValueError):
+                    total_pages = 1
+            else:
+                try:
+                    tc = int(ri.get("total_count") or 0)
+                    pp_ri = int(ri.get("per_page") or per_page)
+                    pp_ri = max(1, pp_ri)
+                    if tc > 0:
+                        total_pages = max(1, (tc + pp_ri - 1) // pp_ri)
+                except (TypeError, ValueError):
+                    total_pages = 1
+        if page >= total_pages or not result:
+            break
+        page += 1
+    out = sorted(by_id.values(), key=lambda r: (r.get("name") or "").lower())
+    return out, last_err
+
+
+def list_cloudflare_accounts(profile_id: str) -> List[Dict[str, str]]:
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    prof = _cloudflare_profile_dict(cfg, profile_id)
+    pinned = str(prof.get("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+
+    out, err = _cloudflare_list_accounts_paginated(profile_id)
     if out:
         return out
     if pinned and not err:
@@ -788,12 +1138,11 @@ def _format_cf_resource_label(name: str, rid: str) -> str:
 
 
 def list_cloudflare_pages_projects(profile_id: str, account_id: str) -> List[Dict[str, str]]:
-    token = cloudflare_token_for_profile(profile_id)
     aid = (account_id or "").strip()
     if not aid:
         return []
     result, _err = _cloudflare_api_request_json(
-        "GET", f"accounts/{aid}/pages/projects", token
+        "GET", f"accounts/{aid}/pages/projects", profile_id
     )
     out: List[Dict[str, str]] = []
     if not isinstance(result, list):
@@ -818,12 +1167,11 @@ def list_cloudflare_pages_projects(profile_id: str, account_id: str) -> List[Dic
 
 
 def list_cloudflare_worker_scripts(profile_id: str, account_id: str) -> List[Dict[str, str]]:
-    token = cloudflare_token_for_profile(profile_id)
     aid = (account_id or "").strip()
     if not aid:
         return []
     result, _err = _cloudflare_api_request_json(
-        "GET", f"accounts/{aid}/workers/scripts", token
+        "GET", f"accounts/{aid}/workers/scripts", profile_id
     )
     out: List[Dict[str, str]] = []
     if not isinstance(result, list):
@@ -845,11 +1193,10 @@ def list_cloudflare_worker_scripts(profile_id: str, account_id: str) -> List[Dic
 
 
 def list_cloudflare_queues(profile_id: str, account_id: str) -> List[Dict[str, str]]:
-    token = cloudflare_token_for_profile(profile_id)
     aid = (account_id or "").strip()
     if not aid:
         return []
-    result, _err = _cloudflare_api_request_json("GET", f"accounts/{aid}/queues", token)
+    result, _err = _cloudflare_api_request_json("GET", f"accounts/{aid}/queues", profile_id)
     out: List[Dict[str, str]] = []
     if not isinstance(result, list):
         return out
@@ -873,11 +1220,10 @@ def list_cloudflare_queues(profile_id: str, account_id: str) -> List[Dict[str, s
 
 
 def list_cloudflare_r2_buckets(profile_id: str, account_id: str) -> List[Dict[str, str]]:
-    token = cloudflare_token_for_profile(profile_id)
     aid = (account_id or "").strip()
     if not aid:
         return []
-    raw, _err = _cloudflare_api_request_json("GET", f"accounts/{aid}/r2/buckets", token)
+    raw, _err = _cloudflare_api_request_json("GET", f"accounts/{aid}/r2/buckets", profile_id)
     out: List[Dict[str, str]] = []
     buckets: Any = None
     if isinstance(raw, dict):
@@ -903,11 +1249,10 @@ def list_cloudflare_r2_buckets(profile_id: str, account_id: str) -> List[Dict[st
 
 
 def list_cloudflare_tunnels(profile_id: str, account_id: str) -> List[Dict[str, str]]:
-    token = cloudflare_token_for_profile(profile_id)
     aid = (account_id or "").strip()
     if not aid:
         return []
-    result, _err = _cloudflare_api_request_json("GET", f"accounts/{aid}/tunnels", token)
+    result, _err = _cloudflare_api_request_json("GET", f"accounts/{aid}/tunnels", profile_id)
     out: List[Dict[str, str]] = []
     if not isinstance(result, list):
         return out
@@ -930,11 +1275,10 @@ def list_cloudflare_tunnels(profile_id: str, account_id: str) -> List[Dict[str, 
 
 
 def list_cloudflare_zones(profile_id: str, account_id: str) -> List[Dict[str, str]]:
-    token = cloudflare_token_for_profile(profile_id)
     aid = (account_id or "").strip()
     if not aid:
         return []
-    result, _err = _cloudflare_api_request_json("GET", "zones", token)
+    result, _err = _cloudflare_api_request_json("GET", "zones", profile_id)
     out: List[Dict[str, str]] = []
     if not isinstance(result, list):
         return out
@@ -983,6 +1327,191 @@ def list_cloudflare_resource_options(
     return []
 
 
+_CLOUDFLARE_CAPABILITY_SCOPE_HINTS: Dict[str, str] = {
+    "frontend": "Grant Account → Cloudflare Pages → Read (or Account read) on your API token.",
+    "worker": "Grant Account → Workers Scripts → Read.",
+    "messaging": "Grant Account → Queues → Read.",
+    "storage": "Grant Account → R2 → Read (or Workers R2 storage read).",
+    "network": "Grant Account → Cloudflare Tunnel → Read.",
+    "domain": "Grant Zone → Zone → Read (and ensure zones belong to CLOUDFLARE_ACCOUNT_ID).",
+}
+
+
+def _cloudflare_probe_capability_count(
+    profile_id: str, account_id: str, capability: str
+) -> tuple[int, str]:
+    """Return ``(resource_count, error_message)`` for health checks (GET list probes)."""
+    cap = (capability or "").strip().lower()
+    aid = (account_id or "").strip()
+    if not aid:
+        return 0, ""
+    if cap == "frontend":
+        result, err = _cloudflare_api_request_json(
+            "GET", f"accounts/{aid}/pages/projects", profile_id
+        )
+        if err:
+            return 0, err
+        return (len(result) if isinstance(result, list) else 0), ""
+    if cap == "worker":
+        result, err = _cloudflare_api_request_json(
+            "GET", f"accounts/{aid}/workers/scripts", profile_id
+        )
+        if err:
+            return 0, err
+        return (len(result) if isinstance(result, list) else 0), ""
+    if cap == "messaging":
+        result, err = _cloudflare_api_request_json("GET", f"accounts/{aid}/queues", profile_id)
+        if err:
+            return 0, err
+        return (len(result) if isinstance(result, list) else 0), ""
+    if cap == "storage":
+        raw, err = _cloudflare_api_request_json("GET", f"accounts/{aid}/r2/buckets", profile_id)
+        if err:
+            return 0, err
+        buckets: Any = None
+        if isinstance(raw, dict):
+            buckets = raw.get("buckets")
+        return (len(buckets) if isinstance(buckets, list) else 0), ""
+    if cap == "network":
+        result, err = _cloudflare_api_request_json("GET", f"accounts/{aid}/tunnels", profile_id)
+        if err:
+            return 0, err
+        return (len(result) if isinstance(result, list) else 0), ""
+    if cap == "domain":
+        result, err = _cloudflare_api_request_json("GET", "zones", profile_id)
+        if err:
+            return 0, err
+        if not isinstance(result, list):
+            return 0, "Unexpected zones response"
+        n = 0
+        for item in result:
+            if not isinstance(item, dict):
+                continue
+            zid = str(item.get("id") or "").strip()
+            if not zid:
+                continue
+            acct = item.get("account")
+            acct_id = ""
+            if isinstance(acct, dict):
+                acct_id = str(acct.get("id") or "").strip()
+            if acct_id and acct_id != aid:
+                continue
+            n += 1
+        return n, ""
+    return 0, ""
+
+
+def cloudflare_profile_health(
+    profile_id: str,
+    *,
+    account_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate Cloudflare credentials for a toolkit profile: accounts list + per-capability GET probes.
+
+    Uses the same auth and API paths as PAS Console. Requires ``CLOUDFLARE_ACCOUNT_ID`` on the profile
+    (or ``account_id`` override) before probing Pages, Workers, Queues, R2, tunnels, or zones — no
+    implicit \"first account\" selection.
+    """
+    pid = (profile_id or "").strip()
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    prof = _cloudflare_profile_dict(cfg, pid)
+    gkey = _cloudflare_global_key_for_profile_dict(prof)
+    email = _cloudflare_email_for_profile_dict(prof)
+    email_required_missing = bool(gkey and not email)
+
+    labeled = _cloudflare_labeled_auth_attempts(prof)
+    credentials_error = ""
+    auth_mode_code = ""
+    auth_mode_human = ""
+    accounts_list: List[Dict[str, str]] = []
+    accounts_error = ""
+
+    if not labeled:
+        credentials_error = _cloudflare_no_credentials_message(prof)
+        accounts_error = credentials_error
+    else:
+        _body, acc_probe_err, auth_mode_code = _cloudflare_api_get_full_traced(
+            pid, "accounts?page=1&per_page=1", timeout=15.0
+        )
+        accounts_list, list_err = _cloudflare_list_accounts_paginated(pid)
+        if list_err and not accounts_list:
+            accounts_error = list_err
+        elif acc_probe_err and not accounts_list:
+            accounts_error = acc_probe_err
+        auth_mode_human = _CLOUDFLARE_AUTH_MODE_LABELS.get(
+            auth_mode_code, auth_mode_code or "unknown"
+        )
+
+    aid_probe = (account_id or "").strip() or str(prof.get("CLOUDFLARE_ACCOUNT_ID") or "").strip()
+    account_id_missing_playbook = ""
+    if not aid_probe:
+        account_id_missing_playbook = (
+            "Set CLOUDFLARE_ACCOUNT_ID for this profile. Open https://dash.cloudflare.com/ — "
+            "after you select an account, copy the account id from the URL or sidebar. "
+            "Without it, PAS cannot verify Pages, Workers, Queues, R2, tunnels, or zones for this profile."
+        )
+
+    caps_config = get_cloudflare_toolkit_capabilities()
+    per_cap: List[Dict[str, Any]] = []
+    for cap in caps_config:
+        cap_l = cap.strip().lower()
+        label = CLOUDFLARE_CAPABILITY_LABELS.get(
+            cap_l, cap_l.replace("_", " ").title()
+        )
+        row: Dict[str, Any] = {
+            "id": cap_l,
+            "label": label,
+            "ok": False,
+            "count": None,
+            "error_hint": "",
+            "skipped_reason": "",
+        }
+        if cap_l not in KNOWN_CLOUDFLARE_HEALTH_PROBE_CAPABILITIES:
+            row["skipped_reason"] = (
+                "No automated API probe for this capability yet (safe to ignore for now)."
+            )
+            per_cap.append(row)
+            continue
+        if not aid_probe:
+            row["skipped_reason"] = account_id_missing_playbook
+            per_cap.append(row)
+            continue
+        n, err = _cloudflare_probe_capability_count(pid, aid_probe, cap_l)
+        row["count"] = n
+        if err:
+            hint = _CLOUDFLARE_CAPABILITY_SCOPE_HINTS.get(
+                cap_l, "Check API token or Global API Key permissions in the Cloudflare dashboard."
+            )
+            row["error_hint"] = f"{err} {hint}"
+        else:
+            row["ok"] = True
+        per_cap.append(row)
+
+    return {
+        "profile_id": pid,
+        "auth_mode_code": auth_mode_code,
+        "auth_mode_human": auth_mode_human,
+        "email_required_missing": email_required_missing,
+        "email_required_message": (
+            "Global API Key requires your Cloudflare dashboard login email. "
+            "Set CLOUDFLARE_EMAIL or `email` on this profile (PAS Console: fill “Account email” when storing a Global API Key)."
+            if email_required_missing
+            else ""
+        ),
+        "credentials_error": credentials_error,
+        "accounts": accounts_list,
+        "accounts_error": accounts_error,
+        "account_id_for_probes": aid_probe,
+        "account_id_missing_playbook": account_id_missing_playbook,
+        "capabilities": per_cap,
+        "playbook_tail": (
+            "Global API Key: always pair with the same email you use to log into dash.cloudflare.com. "
+            "API token: create one with Account (and Zone, if using DNS) permissions matching your "
+            "capabilities list in ~/.pas/cloudflare.json. Run `pas/services/cf-ops.py` for a quick check without the full UI."
+        ),
+    }
+
+
 def _cloudflare_resource_key_from_yaml(capability: str, block: Dict[str, Any]) -> str:
     cap = (capability or "").strip().lower()
     if cap == "frontend":
@@ -1005,10 +1534,21 @@ def _cloudflare_resource_key_from_yaml(capability: str, block: Dict[str, Any]) -
 
 def _cloudflare_view_model(service_name: str, service_block: Dict[str, Any]) -> Dict[str, Any]:
     cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
-    profiles = cfg.get("profiles", {})
     active_profile_id = str(cfg.get("active_profile_id") or "")
     active_profile = _cloudflare_profile_dict(cfg, active_profile_id)
     raw_token = active_profile.get("CLOUDFLARE_API_TOKEN")
+    bearer = str(raw_token or "").strip()
+    gkey = _cloudflare_global_key_for_profile_dict(active_profile)
+    cf_email = _cloudflare_email_for_profile_dict(active_profile)
+    secret_for_display = bearer if bearer else gkey
+    if bearer:
+        storage_hint_src: Any = raw_token
+    elif gkey:
+        storage_hint_src = active_profile.get("CLOUDFLARE_GLOBAL_API_KEY") or active_profile.get(
+            "CLOUDFLARE_API_KEY"
+        )
+    else:
+        storage_hint_src = None
     toolkit_caps = get_cloudflare_toolkit_capabilities()
 
     connection_id = _resolve_service_value(service_block, "connection_id", "org_id")
@@ -1041,9 +1581,10 @@ def _cloudflare_view_model(service_name: str, service_block: Dict[str, Any]) -> 
         "zone_name": _resolve_service_value(service_block, "zone_name"),
         "zone_id": _resolve_service_value(service_block, "zone_id"),
         "env_preview": "",
-        "token_masked": _mask_secret(str(raw_token or "")),
-        "token_storage": _token_storage_hint(active_profile.get("CLOUDFLARE_API_TOKEN")),
-        "token_available": bool(str(raw_token or "").strip()),
+        "cloudflare_auth_email": cf_email,
+        "token_masked": _mask_secret(str(secret_for_display or "")),
+        "token_storage": _token_storage_hint(storage_hint_src),
+        "token_available": bool(bearer or (cf_email and gkey)),
     }
 
 
@@ -1073,9 +1614,11 @@ def reveal_service_secret(provider: str, view_model: Dict[str, Any]) -> str:
     ``active_profile_id``, then ``SUPABASE_ACCESS_TOKEN``. First non-empty wins. Needed so
     ``GET …/database/pooler`` runs and DB checks get multiple ``psql`` host candidates.
 
-    For ``cloudflare``, resolves ``CLOUDFLARE_API_TOKEN`` from the selected toolkit profile
-    (modal ``active_profile_id``), then YAML ``connection_id``, then toolkit default profile,
-    then ``CLOUDFLARE_API_TOKEN`` env.
+    For ``cloudflare``, resolves the secret used for masking/reveal/copy: Bearer
+    ``CLOUDFLARE_API_TOKEN`` if set on the profile, else ``CLOUDFLARE_GLOBAL_API_KEY`` /
+    ``CLOUDFLARE_API_KEY``. Resolution order: modal ``active_profile_id``, YAML
+    ``connection_id``, toolkit ``active_profile_id``, then ``CLOUDFLARE_API_TOKEN`` env
+    (Bearer only; Global API Key is not read from env here).
     """
     p = (provider or "").strip().lower()
     if p == "cloudflare":
@@ -1084,11 +1627,14 @@ def reveal_service_secret(provider: str, view_model: Dict[str, Any]) -> str:
         if not isinstance(profiles, dict):
             return os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
 
-        def token_for_profile_id(pid: str) -> str:
+        def secret_for_profile_id(pid: str) -> str:
             prof = profiles.get((pid or "").strip(), {})
             if not isinstance(prof, dict):
                 return ""
-            return str(prof.get("CLOUDFLARE_API_TOKEN") or "").strip()
+            t = str(prof.get("CLOUDFLARE_API_TOKEN") or "").strip()
+            if t:
+                return t
+            return str(prof.get("CLOUDFLARE_GLOBAL_API_KEY") or prof.get("CLOUDFLARE_API_KEY") or "").strip()
 
         vm_active = str(view_model.get("active_profile_id") or "").strip()
         conn = str(view_model.get("connection_id") or "").strip()
@@ -1096,7 +1642,7 @@ def reveal_service_secret(provider: str, view_model: Dict[str, Any]) -> str:
         for pid in (vm_active, conn, cfg_active):
             if not pid:
                 continue
-            t = token_for_profile_id(pid)
+            t = secret_for_profile_id(pid)
             if t:
                 return t
         return os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Low-level Cloudflare v4 helpers (Bearer token string). For ~/.pas profile checks, prefer ``pas_core.service_config.cloudflare_profile_health``."""
 import json
 import urllib.request
 import urllib.error
