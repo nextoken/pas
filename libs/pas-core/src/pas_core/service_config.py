@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import _en_secretize, get_keychain_secret, load_pas_config, safe_write_json
+from . import _de_secretize, _en_secretize, get_keychain_secret, load_pas_config, safe_write_json
 from .config import resolve_pas_provider_dev_config_path
 
 
@@ -854,6 +854,206 @@ def store_cloudflare_service_token(
     doc["services"] = services
     processed = _en_secretize(doc, "cloudflare")
     save_pas_project_config(root, processed)
+
+
+def _render_env_from_template(template_content: str, flat: Dict[str, str]) -> str:
+    """Substitute merged values into a .env.*.example template.
+
+    Keys present in the template are replaced with merged values; keys absent
+    from the template but present in *flat* are appended at the end.
+    """
+    import re as _re
+    lines = template_content.splitlines(keepends=True)
+    template_keys: set = set()
+    for line in lines:
+        m = _re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", line)
+        if m:
+            template_keys.add(m.group(1))
+    out = []
+    for line in lines:
+        m = _re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)", line.rstrip("\n\r"))
+        if m and m.group(1) in flat:
+            eol = "\n" if line.endswith("\n") else ""
+            out.append(f"{m.group(1)}={flat[m.group(1)]}{eol}")
+        else:
+            out.append(line if line.endswith("\n") else line + "\n")
+    extra = {k: v for k, v in flat.items() if k not in template_keys and v.strip()}
+    if extra:
+        out.append("\n# Added by pas-console (not in example template)\n")
+        for k, v in extra.items():
+            out.append(f"{k}={v}\n")
+    return "".join(out)
+
+
+def _render_env_plain(flat_by_service: Dict[str, Dict[str, str]]) -> str:
+    """Render a plain .env file grouped by service slot with comment headers."""
+    parts = []
+    for svc_name, svc_flat in flat_by_service.items():
+        if not svc_flat:
+            continue
+        parts.append(f"# {svc_name}\n")
+        for k, v in svc_flat.items():
+            parts.append(f"{k}={v}\n")
+        parts.append("\n")
+    body = "".join(parts).rstrip("\n")
+    return body + "\n" if body else ""
+
+
+def write_env_files_for_target(
+    project_root: Any,
+    target_key: str,
+    *,
+    allowed_services: Optional[set] = None,
+    dry_run: bool = False,
+) -> List[Dict[str, Any]]:
+    """Write ``.env.<env>`` files from merged ``.pas.yaml`` environments.
+
+    Behaviour:
+    - Skips envs where every value is empty after de-secretizing.
+    - Uses ``.env.<env>.example`` as a fill-in template when present in the target dir.
+    - ``SEC:`` refs that cannot be resolved via the keychain are written as empty string.
+    - Root dashboard (``target_key == PAS_TARGET_ROOT_KEY``) writes to ``project_root/``.
+    - Target dashboard (e.g. ``"apps/web"``) writes to ``project_root/apps/web/``.
+
+    Returns a list of result dicts::
+
+        { "env": str, "path": str, "written": bool,
+          "template_used": bool, "reason": str }
+
+    ``reason`` is one of: ``"written"`` | ``"skipped:empty"`` |
+    ``"skipped:dry_run"`` | ``"error:..."``
+    """
+    from pathlib import Path as _Path
+    from .config import (
+        load_pas_project_config,
+        get_environments_list_for_target,
+        PAS_TARGET_ROOT_KEY,
+    )
+
+    root = _Path(str(project_root)).expanduser().resolve()
+    target_dir = (
+        root
+        if (not target_key or target_key == PAS_TARGET_ROOT_KEY)
+        else root / target_key
+    )
+
+    config = load_pas_project_config(root)
+    if not config:
+        return [
+            {
+                "env": "",
+                "path": str(root),
+                "written": False,
+                "template_used": False,
+                "reason": "error:no .pas.yaml",
+            }
+        ]
+
+    merged_list = get_environments_list_for_target(
+        config, target_key, allowed_services=allowed_services
+    )
+
+    results: List[Dict[str, Any]] = []
+    for item in merged_list:
+        env_name = str(item.get("name", "")).strip()
+        if not env_name:
+            continue
+        try:
+            merged_data = json.loads(str(item.get("data", "{}")))
+        except Exception:
+            merged_data = {}
+
+        _ENV_ALIASES: Dict[str, str] = {
+            "dev": "development", "development": "dev",
+            "prod": "production",  "production": "prod",
+            "stage": "staging",    "staging": "stage",
+        }
+        env_path = target_dir / f".env.{env_name}"
+        example_path = target_dir / f".env.{env_name}.example"
+        if not example_path.exists():
+            alias = _ENV_ALIASES.get(env_name)
+            if alias:
+                candidate = target_dir / f".env.{alias}.example"
+                if candidate.exists():
+                    example_path = candidate
+
+        # De-secretize quietly (suppress rotation warnings in UI context)
+        de_sec = _de_secretize(merged_data, env_name, quiet=True)
+
+        # Flatten service blocks → {key: value}.
+        # Skip PAS internal metadata fields (they are config, not env vars) and
+        # _meta timestamp sidecars.  Unresolved SEC: refs become empty strings.
+        _PAS_META = frozenset({
+            "provider", "capability", "path", "resource_key",
+            "account_id", "email_store", "active_envs",
+        })
+        flat_by_service: Dict[str, Dict[str, str]] = {}
+        for svc, block in de_sec.items():
+            if not isinstance(block, dict):
+                continue
+            svc_flat: Dict[str, str] = {}
+            for k, v in block.items():
+                if str(k).endswith("_meta") or str(k) in _PAS_META:
+                    continue
+                svc_flat[str(k)] = (
+                    ""
+                    if (isinstance(v, str) and v.startswith("SEC:"))
+                    else (str(v) if v is not None else "")
+                )
+            # Synthesize CLOUDFLARE_ACCOUNT_ID from account_id metadata
+            if str(block.get("provider") or "").lower() == "cloudflare":
+                aid = str(block.get("account_id") or "").strip()
+                if aid:
+                    svc_flat.setdefault("CLOUDFLARE_ACCOUNT_ID", aid)
+            if svc_flat:
+                flat_by_service[str(svc)] = svc_flat
+
+        all_flat = {k: v for sf in flat_by_service.values() for k, v in sf.items()}
+
+        if not any(v.strip() for v in all_flat.values()):
+            results.append(
+                {
+                    "env": env_name,
+                    "path": str(env_path),
+                    "written": False,
+                    "template_used": False,
+                    "reason": "skipped:empty",
+                }
+            )
+            continue
+
+        if dry_run:
+            results.append(
+                {
+                    "env": env_name,
+                    "path": str(env_path),
+                    "written": False,
+                    "template_used": example_path.exists(),
+                    "reason": "skipped:dry_run",
+                }
+            )
+            continue
+
+        template_used = example_path.exists()
+        if template_used:
+            content = _render_env_from_template(
+                example_path.read_text(encoding="utf-8"), all_flat
+            )
+        else:
+            content = _render_env_plain(flat_by_service)
+
+        env_path.write_text(content, encoding="utf-8")
+        results.append(
+            {
+                "env": env_name,
+                "path": str(env_path),
+                "written": True,
+                "template_used": template_used,
+                "reason": "written",
+            }
+        )
+
+    return results
 
 
 def _cloudflare_ssl_context():
