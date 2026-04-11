@@ -826,6 +826,36 @@ def set_cloudflare_toolkit_profile_global_api_key(
     safe_write_json(path, processed, indent=2)
 
 
+def store_cloudflare_service_token(
+    project_root: Any, service_name: str, token_plaintext: str
+) -> None:
+    """Store ``CLOUDFLARE_API_TOKEN`` in the service block of ``.pas.yaml``, secretized.
+
+    Loads the existing project config, sets ``services[service_name]["CLOUDFLARE_API_TOKEN"]``
+    to *token_plaintext*, applies ``_en_secretize`` so the value is moved to the OS keychain
+    (replaced with a ``SEC:`` reference), then saves the document back.
+    """
+    from pathlib import Path as _Path
+    from .config import load_pas_project_config_document, save_pas_project_config
+
+    root = _Path(str(project_root)).expanduser().resolve()
+    _, doc = load_pas_project_config_document(root)
+    services = doc.get("services")
+    if not isinstance(services, dict):
+        raise ValueError("No services block in .pas.yaml")
+    svc = (service_name or "").strip()
+    if svc not in services:
+        raise ValueError(f"Service '{svc}' not found in .pas.yaml")
+    block = services[svc]
+    if not isinstance(block, dict):
+        block = {}
+    block["CLOUDFLARE_API_TOKEN"] = (token_plaintext or "").strip()
+    services[svc] = block
+    doc["services"] = services
+    processed = _en_secretize(doc, "cloudflare")
+    save_pas_project_config(root, processed)
+
+
 def _cloudflare_ssl_context():
     return ssl._create_unverified_context() if os.environ.get("VERIFY_SSL") == "false" else None
 
@@ -835,11 +865,13 @@ def _cloudflare_v4_request_full_once(
     auth: Dict[str, str],
     *,
     method: str = "GET",
+    json_body: Optional[Dict[str, Any]] = None,
     timeout: float = 20.0,
     ctx: Any = None,
 ) -> tuple[Optional[Dict[str, Any]], str, bool]:
     """Perform one Cloudflare v4 request. Returns ``(body, err, retry_other_auth)``; retry on HTTP 401 only."""
-    req = urllib.request.Request(url, method=method.upper())
+    body_bytes = json.dumps(json_body).encode() if json_body is not None else None
+    req = urllib.request.Request(url, data=body_bytes, method=method.upper())
     for hk, hv in auth.items():
         req.add_header(hk, hv)
     req.add_header("Content-Type", "application/json")
@@ -1127,6 +1159,118 @@ def list_cloudflare_accounts(profile_id: str) -> List[Dict[str, str]]:
     if pinned:
         return [{"id": pinned, "name": pinned, "display_label": f"{pinned} · (from profile, list failed)"}]
     return []
+
+
+def _cloudflare_api_post_json(
+    profile_id: str,
+    path: str,
+    body: Dict[str, Any],
+    *,
+    timeout: float = 20.0,
+) -> tuple[Optional[Any], str]:
+    """POST a v4 path with a JSON body; returns ``(result_payload, error_str)``."""
+    cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
+    prof = _cloudflare_profile_dict(cfg, profile_id)
+    labeled = _cloudflare_labeled_auth_attempts(prof)
+    if not labeled:
+        return None, _cloudflare_no_credentials_message(prof)
+    p = path.lstrip("/")
+    url = f"https://api.cloudflare.com/client/v4/{p}"
+    ctx = _cloudflare_ssl_context()
+    last_err = ""
+    for auth, _mode in labeled:
+        raw, err, retry = _cloudflare_v4_request_full_once(
+            url, auth, method="POST", json_body=body, timeout=timeout, ctx=ctx
+        )
+        if not err:
+            return raw.get("result") if isinstance(raw, dict) else raw, ""
+        last_err = err
+        if not retry:
+            return None, err
+    return None, last_err
+
+
+def create_cloudflare_pages_project(
+    profile_id: str,
+    account_id: str,
+    project_name: str,
+    production_branch: str = "main",
+) -> tuple[str, str]:
+    """Create a Cloudflare Pages project. Returns ``(project_name, error)``."""
+    aid = (account_id or "").strip()
+    name = (project_name or "").strip()
+    branch = (production_branch or "main").strip() or "main"
+    if not aid:
+        return "", "account_id is required"
+    if not name:
+        return "", "project_name is required"
+    _, err = _cloudflare_api_post_json(
+        profile_id,
+        f"accounts/{aid}/pages/projects",
+        {"name": name, "production_branch": branch},
+    )
+    if err:
+        return "", err
+    return name, ""
+
+
+def create_cloudflare_pages_api_token(
+    profile_id: str, account_id: str, project_name: str
+) -> tuple[str, str]:
+    """Create a CF API token with Cloudflare Pages:Edit permission scoped to *account_id*.
+
+    Returns ``(token_value, error)``. Token value is only available at creation time.
+    """
+    aid = (account_id or "").strip()
+    name = (project_name or "").strip()
+    if not aid:
+        return "", "account_id is required"
+
+    # 1. Discover the Pages:Edit permission group id
+    groups_result, err = _cloudflare_api_request_json(
+        "GET", "user/tokens/permission_groups", profile_id
+    )
+    if err:
+        return "", f"Could not list permission groups: {err}"
+    if not isinstance(groups_result, list):
+        return "", "Unexpected permission_groups payload"
+    pages_edit_id = ""
+    # CF API uses "Pages Write" as the edit permission group.
+    # Also try legacy/variant names in case the account uses different naming.
+    candidates = [g for g in groups_result if isinstance(g, dict)]
+    for needle in ("pages write", "cloudflare pages:edit", "pages:edit", "pages:write"):
+        for g in candidates:
+            if str(g.get("name") or "").lower().replace(" ", "").replace(":", "") == needle.replace(" ", "").replace(":", ""):
+                pages_edit_id = str(g.get("id") or "").strip()
+                break
+        if pages_edit_id:
+            break
+    if not pages_edit_id:
+        page_related = [str(g.get("name") or "") for g in candidates if "page" in str(g.get("name") or "").lower()]
+        if page_related:
+            return "", f"No Pages Write group found. Page-related groups available: {page_related}"
+        all_names = sorted(str(g.get("name") or "") for g in candidates)
+        return "", f"No Pages Write group found among {len(all_names)} groups: {all_names}"
+
+    # 2. Create the token
+    token_name = f"pas/{name} Pages" if name else "pas Pages"
+    payload: Dict[str, Any] = {
+        "name": token_name,
+        "policies": [
+            {
+                "effect": "allow",
+                "resources": {f"com.cloudflare.api.account.{aid}": "*"},
+                "permission_groups": [{"id": pages_edit_id}],
+            }
+        ],
+    }
+    result, err = _cloudflare_api_post_json(profile_id, "user/tokens", payload)
+    if err:
+        return "", f"Could not create API token: {err}"
+    token_value = str((result or {}).get("value") or "").strip() if isinstance(result, dict) else ""
+    if not token_value:
+        return "", "Token created but value not returned (check Cloudflare dashboard)"
+    return token_value, ""
 
 
 def _format_cf_resource_label(name: str, rid: str) -> str:
@@ -1532,6 +1676,19 @@ def _cloudflare_resource_key_from_yaml(capability: str, block: Dict[str, Any]) -
     return ""
 
 
+def _cloudflare_service_token_view_fields(service_block: Dict[str, Any]) -> Dict[str, str]:
+    """Extract the service-level ``CLOUDFLARE_API_TOKEN`` from the YAML block for display."""
+    service_token_raw = _resolve_service_value(service_block, "CLOUDFLARE_API_TOKEN")
+    if service_token_raw.startswith("SEC:"):
+        service_token_plain = str(get_keychain_secret(service_token_raw[4:]) or "")
+    else:
+        service_token_plain = service_token_raw
+    return {
+        "service_token_masked": _mask_secret(service_token_plain),
+        "service_token_storage": _token_storage_hint(service_token_raw),
+    }
+
+
 def _cloudflare_view_model(service_name: str, service_block: Dict[str, Any]) -> Dict[str, Any]:
     cfg = normalize_cloudflare_toolkit_config(load_pas_config("cloudflare", quiet=True))
     active_profile_id = str(cfg.get("active_profile_id") or "")
@@ -1585,6 +1742,7 @@ def _cloudflare_view_model(service_name: str, service_block: Dict[str, Any]) -> 
         "token_masked": _mask_secret(str(secret_for_display or "")),
         "token_storage": _token_storage_hint(storage_hint_src),
         "token_available": bool(bearer or (cf_email and gkey)),
+        **_cloudflare_service_token_view_fields(service_block),
     }
 
 
